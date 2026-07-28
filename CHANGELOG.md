@@ -7,9 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-> **Targets 0.3.0.** This section contains breaking changes, so the MINOR must
-> move — pre-1.0, that is the only signal a caret range (`^0.2.0`) respects.
-> `package.json` is bumped as part of the release commit, not here.
+## [0.3.0] - 2026-07-28
+
+Contains breaking changes, so the MINOR moves — pre-1.0 that is the only
+signal a caret range (`^0.2.0`) respects.
 
 ### Added
 
@@ -482,7 +483,6 @@ anyone who vendored the source or installed from git.
   (default 30000 ms) so a middleware that never calls `next()` fails the request
   instead of leaking the connection.
 
-<!-- 0.2.0 was merged as 95910b3 on Lexmata/nestjs-bun. No git tag exists yet, so
-     the link points at the merge commit rather than a release page that 404s. -->
-[Unreleased]: https://github.com/Lexmata/nestjs-bun/compare/95910b3...HEAD
-[0.2.0]: https://github.com/Lexmata/nestjs-bun/commit/95910b3d1aa581218214e1b0d1adc95f43598a66
+[Unreleased]: https://github.com/Lexmata/nestjs-bun/compare/v0.3.0...HEAD
+[0.3.0]: https://github.com/Lexmata/nestjs-bun/compare/v0.2.0...v0.3.0
+[0.2.0]: https://github.com/Lexmata/nestjs-bun/releases/tag/v0.2.0
