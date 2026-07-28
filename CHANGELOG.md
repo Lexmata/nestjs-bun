@@ -7,6 +7,51 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-07-28
+
+A packaging release. No runtime behaviour changes — the adapter, both compat
+layers and the public API are byte-identical to 0.3.0.
+
+### Changed
+
+- **The published tarball no longer contains `src/`.** `files` was
+  `["dist", "src", "!src/**/*.test.ts"]` and is now `["dist"]`. Nothing could
+  import those sources anyway: the `exports` map only exposes `.` and
+  `./package.json`, so deep imports such as
+  `@lexmata/nestjs-platform-bun/src/bun-adapter` were already unresolvable.
+
+- **Sourcemaps now embed their sources.** `tsup.config.ts` previously set
+  `esbuildOptions.sourcesContent = false` *because* `src/` shipped alongside
+  `dist/` — the maps carried bare relative `sources` paths and both Node and
+  Bun read the original TypeScript off disk. With `src/` gone those paths
+  resolve to nothing, so `sourcesContent` returns to its default and each map
+  carries the TypeScript inline. Minified stack traces still symbolicate.
+
+  Net effect on install size is close to a wash: the sources move out of their
+  own files and into the two maps rather than being added on top.
+
+### Added
+
+- `CLAUDE.md` — repository guidance for Claude Code covering the request flow
+  through `BunAdapter#handleRequest`, the invariants a refactor would break
+  (the re-read `fastifyCtx()` predicate, `trustProxy === true`), and the gate
+  gotchas (plural-only coverage threshold keys, the split typecheck gates,
+  benchmark floors derived from `pnpm verify` rather than `pnpm bench`).
+
+### Fixed
+
+- **CI now runs on `develop`, not just `main`.** `develop` is the git-flow
+  integration branch, so every pull request lands there — but `ci.yml`
+  triggered on `main` only, which meant lint, typecheck, the test suite and
+  the benchmark gate first ran *after* review, when `develop` merged to
+  `main`. Pull requests into `develop` had merged with no automated
+  verification at all.
+
+- Root-level `*.pem`, `*.key` and `*.crt` are gitignored. `examples/.gitignore`
+  already covered `*.pem` under `examples/`; this extends it to the patterns it
+  did not cover, so output from `examples/04-tls/generate-cert.sh` cannot be
+  committed from any directory.
+
 ## [0.3.0] - 2026-07-28
 
 Contains breaking changes, so the MINOR moves — pre-1.0 that is the only
@@ -483,6 +528,7 @@ anyone who vendored the source or installed from git.
   (default 30000 ms) so a middleware that never calls `next()` fails the request
   instead of leaking the connection.
 
-[Unreleased]: https://github.com/Lexmata/nestjs-bun/compare/v0.3.0...HEAD
+[Unreleased]: https://github.com/Lexmata/nestjs-bun/compare/v0.4.0...HEAD
+[0.4.0]: https://github.com/Lexmata/nestjs-bun/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/Lexmata/nestjs-bun/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/Lexmata/nestjs-bun/releases/tag/v0.2.0
