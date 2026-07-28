@@ -89,3 +89,8 @@ benchmark/coverage/
 
 # Husky
 .husky/_/
+
+# Generated TLS material (examples/04-tls/generate-cert.sh)
+*.pem
+*.key
+*.crt
