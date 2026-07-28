@@ -3,8 +3,6 @@
 # denied. Without this file the benchmark's install step exits 1, which takes
 # the whole CI benchmark job down before a single request is measured.
 #
-# esbuild needs its script - it links the platform binary that tsx runs on.
 # @nestjs/core's script only prints a donation message.
 allowBuilds:
   '@nestjs/core': false
-  esbuild: true

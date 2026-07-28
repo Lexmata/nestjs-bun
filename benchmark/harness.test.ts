@@ -159,24 +159,29 @@ describe("buildAdapters", () => {
     }
   });
 
-  it("launches the Node baselines through the workspace-local tsx, never npx", () => {
-    // npx can fetch a tsx from the registry when none is installed locally, so
-    // the benchmark would measure a different transpiler than CI pinned.
+  it("runs the Node baselines on node directly, with no transpiler in the process", () => {
+    // Running these under tsx biased the comparison: an esbuild loader hook
+    // stayed resident for the life of the process, a cost the natively-executed
+    // Bun app never paid, and esbuild does not emit decorator metadata.
     const nodeBaselines = buildAdapters(4000).filter((a) => a.name !== "Bun");
     expect(nodeBaselines).toHaveLength(2);
 
     for (const adapter of nodeBaselines) {
+      expect(adapter.command).toBe("node");
       expect(adapter.command).not.toBe("npx");
-      expect(adapter.command).toMatch(/node_modules[\\/]\.bin[\\/]tsx$/);
-      expect(adapter.args).not.toContain("tsx");
-      expect(adapter.args[0]).toMatch(/^apps\/.+\.ts$/);
+      expect(adapter.args).toHaveLength(1);
+      expect(adapter.args[0]).toMatch(/[\\/]dist[\\/]apps[\\/].+-app\.js$/);
+      // A .ts entry point here would mean a transpiler is back in the loop.
+      expect(adapter.args[0]).not.toMatch(/\.ts$/);
     }
   });
 
-  it("runs the Bun app on bun directly", () => {
+  it("runs the compiled Bun app on bun directly", () => {
     const bun = buildAdapters(4000).find((a) => a.name === "Bun");
     expect(bun?.command).toBe("bun");
-    expect(bun?.args).toEqual(["apps/bun-app.ts"]);
+    expect(bun?.args).toHaveLength(1);
+    expect(bun?.args[0]).toMatch(/[\\/]dist[\\/]apps[\\/]bun-app\.js$/);
+    expect(bun?.args[0]).not.toMatch(/\.ts$/);
   });
 });
 
@@ -443,15 +448,15 @@ describe("waitForServer", () => {
 
   it("reports a timeout, with the URL and the last error, when nothing is listening", async () => {
     // Port 1 is privileged and never bound by a test fixture.
-    const reason = await waitForServer(1, 300);
-    expect(reason).toContain("timed out after 300ms");
+    const reason = await waitForServer(1, 100, 25);
+    expect(reason).toContain("timed out after 100ms");
     expect(reason).toContain("http://localhost:1/health");
     expect(reason).toContain("last error");
   });
 
   it("keeps waiting while /health answers non-2xx", async () => {
     const fixture = await startFixture(() => [503, "starting"]);
-    const reason = await waitForServer(fixture.port, 400);
+    const reason = await waitForServer(fixture.port, 100, 25);
     expect(reason).toContain("HTTP 503 from /health");
   });
 });
@@ -529,7 +534,7 @@ describe("startServer / stopServer", () => {
       port,
     });
 
-    expect(await waitForServer(port, 300)).toContain("timed out");
+    expect(await waitForServer(port, 100, 25)).toContain("timed out");
     await stopServer(proc, port);
   }, 15_000);
 

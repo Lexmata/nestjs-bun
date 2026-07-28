@@ -54,14 +54,11 @@ export class BenchmarkService {
  */
 @Controller()
 export class BenchmarkController {
-  // The token is stated explicitly rather than inferred from `design:paramtypes`.
-  //
-  // The Express and Fastify apps run under tsx, and esbuild (which tsx uses)
-  // does not implement `emitDecoratorMetadata` - so type-inferred DI silently
-  // resolves to `undefined` and every service-backed route returns HTTP 500.
-  // Bun's transpiler *does* emit the metadata, so relying on inference would
-  // compare a working Bun app against two permanently broken baselines.
-  // Explicit injection makes all three adapters behave identically.
+  // The token is stated explicitly rather than inferred from `design:paramtypes`,
+  // so DI does not depend on the transpiler emitting decorator metadata. A
+  // transpiler that skips it resolves type-inferred DI to `undefined` and every
+  // service-backed route returns HTTP 500 - which would compare a working app
+  // against a permanently broken baseline. See BENCHMARK.md.
   constructor(@Inject(BenchmarkService) private readonly service: BenchmarkService) {}
 
   // Simple text response

@@ -18,22 +18,20 @@ import type autocannon from "autocannon";
 export type AutocannonResult = autocannon.Result;
 
 /**
- * Absolute path to the workspace-local `tsx`.
+ * Directory holding the compiled benchmark apps.
  *
- * Deliberately not `npx`: `npx` will happily fetch a `tsx` from the registry
- * when it cannot find one locally, so the benchmark could end up measuring a
- * different transpiler than CI installed — and silently, since `npx` prints
- * nothing distinctive when it does. `pnpm exec tsx` would also work; the direct
- * binary is used because it removes a process layer between us and the server
- * we later have to signal.
+ * The apps are run as COMPILED JavaScript, executed directly by each runtime -
+ * `node` for the Node adapters, `bun` for the Bun one - with no transpiler in
+ * the process. A transpiler hook on only one side biases the comparison: it
+ * stays resident for the life of the process, a cost the natively-executed Bun
+ * app never paid. See benchmark/tsconfig.build.json.
  *
- * Resolved against `process.cwd()` rather than the module's own directory
- * because the adapter argv (`apps/express-app.ts`) is already relative to the
- * working directory: both `pnpm bench` and `pnpm verify` run from `benchmark/`.
- * If the binary is missing, `startServer`'s `error` handler reports the full
- * path, which names the fix (`pnpm install` in `benchmark/`).
+ * Paths are relative to `process.cwd()`, which is `benchmark/` for both
+ * `pnpm bench` and `pnpm verify`. Run `pnpm build` first; `startServer`'s
+ * `error` handler reports the full path when the file is missing, which names
+ * the fix.
  */
-const TSX_BIN = join(process.cwd(), "node_modules", ".bin", "tsx");
+const APP_DIR = join(process.cwd(), "dist", "apps");
 
 export interface AdapterConfig {
   name: string;
@@ -72,22 +70,22 @@ export function buildAdapters(portBase: number): AdapterConfig[] {
   return [
     {
       name: "Express",
-      command: TSX_BIN,
-      args: ["apps/express-app.ts"],
+      command: "node",
+      args: [join(APP_DIR, "express-app.js")],
       port: portBase + 1,
       env: { PORT: String(portBase + 1) },
     },
     {
       name: "Fastify",
-      command: TSX_BIN,
-      args: ["apps/fastify-app.ts"],
+      command: "node",
+      args: [join(APP_DIR, "fastify-app.js")],
       port: portBase + 2,
       env: { PORT: String(portBase + 2) },
     },
     {
       name: "Bun",
       command: "bun",
-      args: ["apps/bun-app.ts"],
+      args: [join(APP_DIR, "bun-app.js")],
       port: portBase + 3,
       env: { PORT: String(portBase + 3) },
     },
@@ -208,20 +206,39 @@ export async function sleep(ms: number): Promise<void> {
 /**
  * Poll /health until the server answers or the timeout elapses.
  * Returns null on success, or a human-readable reason on failure.
+ *
+ * The inter-poll sleep is clamped to whatever is left of the budget. An
+ * unclamped `sleep(intervalMs)` overshoots to `ceil(timeoutMs/intervalMs) *
+ * intervalMs`, so the returned message understated the real wait - a 300ms
+ * timeout actually took ~506ms and still reported "timed out after 300ms".
  */
-export async function waitForServer(port: number, timeoutMs: number): Promise<string | null> {
+export async function waitForServer(
+  port: number,
+  timeoutMs: number,
+  intervalMs = 250
+): Promise<string | null> {
   const deadline = Date.now() + timeoutMs;
   let lastError = "no response";
 
   while (Date.now() < deadline) {
     try {
-      const response = await fetch(`http://localhost:${port}/health`);
+      // Each attempt is bounded too, not just the sleep between attempts. The
+      // case this function exists to catch - a server that binds the port and
+      // then wedges - accepts the connection and never answers, so an unbounded
+      // fetch hangs here forever and the timeout is never reported.
+      const attemptBudget = Math.max(1, Math.min(intervalMs, deadline - Date.now()));
+      const response = await fetch(`http://localhost:${port}/health`, {
+        signal: AbortSignal.timeout(attemptBudget),
+      });
       if (response.ok) return null;
       lastError = `HTTP ${response.status} from /health`;
     } catch (err) {
       lastError = err instanceof Error ? err.message : String(err);
     }
-    await sleep(250);
+
+    const remaining = deadline - Date.now();
+    if (remaining <= 0) break;
+    await sleep(Math.min(intervalMs, remaining));
   }
 
   return `timed out after ${timeoutMs}ms waiting for http://localhost:${port}/health (last error: ${lastError})`;
@@ -357,7 +374,7 @@ async function loadAutocannon(): Promise<typeof autocannon> {
       | { default: typeof autocannon }
       | typeof autocannon;
     // `@types/autocannon` uses `export =`, so the interop shape differs between
-    // the ESM and CJS transpilations tsx may produce. Accept either.
+    // an ESM and a CJS emit. Accept either.
     autocannonModule =
       typeof imported === "function" ? imported : (imported as { default: typeof autocannon }).default;
   }
