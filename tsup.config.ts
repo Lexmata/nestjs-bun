@@ -18,11 +18,8 @@ export default defineConfig({
   // its own error messages. Keeping names costs ~0.5 KB and keeps those readable.
   keepNames: true,
   external: ["@nestjs/common", "@nestjs/core", "bun"],
-  esbuildOptions(options) {
-    // Ship the sources once via `files: ["src", ...]` in package.json rather
-    // than embedding a byte-identical copy in each of the two sourcemaps. The
-    // maps already carry relative `sources` paths, so both Node and Bun read
-    // the original TypeScript off disk and stack traces still resolve.
-    options.sourcesContent = false;
-  },
+  // `sourcesContent` is left at its default (true) so each sourcemap embeds the
+  // TypeScript it maps to. The package ships `dist` only, so a map carrying
+  // bare relative `sources` paths would resolve to nothing on a consumer's disk
+  // and minified stack traces would not symbolicate.
 });

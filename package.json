@@ -26,9 +26,7 @@
     "bun": ">=1.0.0"
   },
   "files": [
-    "dist",
-    "src",
-    "!src/**/*.test.ts"
+    "dist"
   ],
   "scripts": {
     "build": "tsup",
