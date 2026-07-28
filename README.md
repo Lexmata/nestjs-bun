@@ -130,6 +130,36 @@ const server = Bun.serve({ port: 3000, fetch: () => new Response('booting') });
 const app = await NestBunFactory.createWithServer(AppModule, server);
 ```
 
+### Serving static assets
+
+```typescript
+app.useStaticAssets('./public');
+app.useStaticAssets('./public', { prefix: '/static' });
+```
+
+Files are streamed, never buffered, so peak memory does not scale with `filesize × concurrency`. Paths that traverse outside the root, dotfiles (`.env`, `.git/config`), and symlinks whose target escapes the root are refused. `X-Content-Type-Options: nosniff` is always set.
+
+#### `transfer`
+
+`transfer` picks how the bytes reach the client. The two modes trade against each other and neither is strictly better:
+
+| | `'stream'` (default) | `'sendfile'` |
+| --- | --- | --- |
+| Symlink TOCTOU | closed | open |
+| `GET` framing | `Transfer-Encoding: chunked` | `Content-Length` |
+
+`'stream'` opens the file once, checks containment against **that descriptor**, and streams it, so nothing re-opens a path that could have been swapped in between. The cost is that a stream has no declared length, so Bun frames the response as chunked and clients lose `Content-Length` — and with it, download progress.
+
+`'sendfile'` hands Bun the path, keeping `Content-Length` and Bun's `sendfile(2)` fast path. Containment is still checked, but against the path rather than the opened inode, so anyone able to write into the root can in principle replace a file with a symlink between the check and the open.
+
+```typescript
+// Build output that no untrusted process can write to, and clients want
+// Content-Length for progress reporting.
+app.useStaticAssets('./dist', { transfer: 'sendfile' });
+```
+
+Reach for `'sendfile'` when both of those hold. Keep the default when the root is writable by anything you do not control — a user-upload directory being the obvious case. `HEAD` reports `Content-Length` either way.
+
 ## What's exported
 
 | Export | Purpose |
