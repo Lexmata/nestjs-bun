@@ -1,7 +1,49 @@
 type ResponseBody = string | ArrayBuffer | Uint8Array | ReadableStream | Blob | null;
 
+/** Status codes that must not carry a body — `new Response(body, { status })` throws for these. */
+const NULL_BODY_STATUSES: ReadonlySet<number> = new Set([204, 205, 304]);
+
+/** The only status codes a redirect may use. */
+const REDIRECT_STATUSES: ReadonlySet<number> = new Set([301, 302, 303, 307, 308]);
+
+/** Reason phrases, hoisted so it is allocated once rather than per call. */
+const STATUS_TEXTS: Readonly<Record<number, string>> = Object.freeze({
+  200: "OK",
+  201: "Created",
+  204: "No Content",
+  301: "Moved Permanently",
+  302: "Found",
+  304: "Not Modified",
+  400: "Bad Request",
+  401: "Unauthorized",
+  403: "Forbidden",
+  404: "Not Found",
+  405: "Method Not Allowed",
+  409: "Conflict",
+  422: "Unprocessable Entity",
+  429: "Too Many Requests",
+  500: "Internal Server Error",
+  502: "Bad Gateway",
+  503: "Service Unavailable",
+});
+
 /**
- * Response builder for creating Bun-compatible Response objects
+ * Response builder for creating Bun-compatible Response objects.
+ *
+ * Methods come in two flavours:
+ * - **Chainable** — {@link ResponseBuilder.status}, {@link ResponseBuilder.header},
+ *   {@link ResponseBuilder.headers}. These return `this`, so they can be chained.
+ * - **Terminal** — {@link ResponseBuilder.json}, {@link ResponseBuilder.text},
+ *   {@link ResponseBuilder.html}, {@link ResponseBuilder.binary},
+ *   {@link ResponseBuilder.stream}, {@link ResponseBuilder.file},
+ *   {@link ResponseBuilder.redirect}, {@link ResponseBuilder.build}. These set the
+ *   body (where applicable) and return the finished `Response`, ending the chain.
+ *
+ * ```ts
+ * response().status(201).header("X-Request-Id", id).json({ ok: true });
+ * ```
+ *
+ * A `Content-Type` you set explicitly is never overwritten by a terminal method.
  */
 export class ResponseBuilder {
   private _status: number = 200;
@@ -9,7 +51,7 @@ export class ResponseBuilder {
   private _body: ResponseBody = null;
 
   /**
-   * Set the status code
+   * Set the status code (chainable)
    */
   public status(code: number): this {
     this._status = code;
@@ -17,7 +59,7 @@ export class ResponseBuilder {
   }
 
   /**
-   * Set a header
+   * Set a header (chainable)
    */
   public header(name: string, value: string): this {
     this._headers.set(name, value);
@@ -25,7 +67,7 @@ export class ResponseBuilder {
   }
 
   /**
-   * Set multiple headers
+   * Set multiple headers (chainable)
    */
   public headers(headers: Record<string, string>): this {
     for (const [name, value] of Object.entries(headers)) {
@@ -35,47 +77,51 @@ export class ResponseBuilder {
   }
 
   /**
-   * Set JSON body
+   * Build a Response with a JSON body (terminal — ends the chain).
+   *
+   * Defaults `Content-Type` to `application/json` unless one was already set.
    */
   public json(data: unknown): Response {
-    this._headers.set("Content-Type", "application/json");
+    this.defaultContentType("application/json");
     this._body = JSON.stringify(data);
     return this.build();
   }
 
   /**
-   * Set text body
+   * Build a Response with a text body (terminal — ends the chain).
+   *
+   * Defaults `Content-Type` to `text/plain` unless one was already set.
    */
   public text(data: string): Response {
-    if (!this._headers.has("Content-Type")) {
-      this._headers.set("Content-Type", "text/plain");
-    }
+    this.defaultContentType("text/plain");
     this._body = data;
     return this.build();
   }
 
   /**
-   * Set HTML body
+   * Build a Response with an HTML body (terminal — ends the chain).
+   *
+   * Defaults `Content-Type` to `text/html` unless one was already set.
    */
   public html(data: string): Response {
-    this._headers.set("Content-Type", "text/html");
+    this.defaultContentType("text/html");
     this._body = data;
     return this.build();
   }
 
   /**
-   * Set binary body
+   * Build a Response with a binary body (terminal — ends the chain).
+   *
+   * Defaults `Content-Type` to `application/octet-stream` unless one was already set.
    */
   public binary(data: ArrayBuffer | Uint8Array): Response {
-    if (!this._headers.has("Content-Type")) {
-      this._headers.set("Content-Type", "application/octet-stream");
-    }
+    this.defaultContentType("application/octet-stream");
     this._body = data;
     return this.build();
   }
 
   /**
-   * Set stream body
+   * Build a Response streaming the given body (terminal — ends the chain).
    */
   public stream(data: ReadableStream): Response {
     this._body = data;
@@ -83,35 +129,68 @@ export class ResponseBuilder {
   }
 
   /**
-   * Send file as response
+   * Build a Response serving a file from disk (terminal — ends the chain).
+   *
+   * If the file does not exist the accumulated headers are kept and the status is
+   * forced to 404. `Content-Type` is taken from the file's extension unless one
+   * was already set, falling back to `application/octet-stream`.
    */
   public async file(path: string): Promise<Response> {
     const file = Bun.file(path);
+
     if (!(await file.exists())) {
-      return new Response("Not Found", { status: 404 });
+      this._status = 404;
+      this.defaultContentType("text/plain");
+      this._body = "Not Found";
+      return this.build();
     }
 
-    const mimeType = file.type;
-    this._headers.set("Content-Type", mimeType);
+    this.defaultContentType(file.type === "" ? "application/octet-stream" : file.type);
     this._body = file;
     return this.build();
   }
 
   /**
-   * Create a redirect response
+   * Build a redirect Response (terminal — ends the chain).
+   *
+   * Unlike `Response.redirect()`, this goes through the builder, so headers set
+   * earlier (cookies, tracing ids) survive and relative URLs are allowed.
+   *
+   * @param status Defaults to a redirect status set earlier via {@link status}, else 302.
+   * @throws {RangeError} if `status` is not a redirect status code.
    */
-  public redirect(url: string, status: number = 302): Response {
-    return Response.redirect(url, status);
+  public redirect(url: string, status?: number): Response {
+    const code = status ?? (REDIRECT_STATUSES.has(this._status) ? this._status : 302);
+    if (!REDIRECT_STATUSES.has(code)) {
+      throw new RangeError(
+        `Invalid redirect status code: ${code}. Expected one of 301, 302, 303, 307, 308.`
+      );
+    }
+
+    this._headers.set("Location", url);
+    this._status = code;
+    this._body = null;
+    return this.build();
   }
 
   /**
-   * Build the final Response object
+   * Build the final Response object (terminal — ends the chain).
+   *
+   * The body is dropped for statuses that must not carry one (204, 205, 304),
+   * which would otherwise make the `Response` constructor throw.
    */
   public build(): Response {
-    return new Response(this._body, {
+    return new Response(NULL_BODY_STATUSES.has(this._status) ? null : this._body, {
       status: this._status,
       headers: this._headers,
     });
+  }
+
+  /** Set `Content-Type` only if the caller has not already chosen one. */
+  private defaultContentType(value: string): void {
+    if (!this._headers.has("Content-Type")) {
+      this._headers.set("Content-Type", value);
+    }
   }
 }
 
@@ -153,9 +232,15 @@ export function html(data: string, status: number = 200): Response {
 }
 
 /**
- * Quick error response
+ * Quick error response.
+ *
+ * Produces a JSON body of `{ statusCode, message, error }`, except for statuses
+ * that must not carry a body (204, 205, 304), which yield an empty response.
  */
 export function error(message: string, statusCode: number = 500): Response {
+  if (NULL_BODY_STATUSES.has(statusCode)) {
+    return new Response(null, { status: statusCode });
+  }
   return json({ statusCode, message, error: getStatusText(statusCode) }, statusCode);
 }
 
@@ -163,24 +248,5 @@ export function error(message: string, statusCode: number = 500): Response {
  * Get HTTP status text for a status code
  */
 function getStatusText(status: number): string {
-  const statusTexts: Record<number, string> = {
-    200: "OK",
-    201: "Created",
-    204: "No Content",
-    301: "Moved Permanently",
-    302: "Found",
-    304: "Not Modified",
-    400: "Bad Request",
-    401: "Unauthorized",
-    403: "Forbidden",
-    404: "Not Found",
-    405: "Method Not Allowed",
-    409: "Conflict",
-    422: "Unprocessable Entity",
-    429: "Too Many Requests",
-    500: "Internal Server Error",
-    502: "Bad Gateway",
-    503: "Service Unavailable",
-  };
-  return statusTexts[status] ?? "Unknown";
+  return STATUS_TEXTS[status] ?? "Unknown";
 }

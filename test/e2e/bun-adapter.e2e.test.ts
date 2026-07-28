@@ -6,11 +6,30 @@
  */
 
 import { describe, it, expect, beforeAll, afterAll, beforeEach, afterEach } from "vitest";
+import { existsSync, mkdtempSync, readFileSync, rmSync, unlinkSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { BunAdapter } from "../../src/bun-adapter";
 
 // Skip all tests if not running in Bun
 const isBun = typeof globalThis.Bun !== "undefined";
 const describeIfBun = isBun ? describe : describe.skip;
+
+/**
+ * Bun's `fetch` accepts two options the DOM type does not declare: `unix` (dial
+ * a socket path instead of a host) and `tls` (per-request TLS settings).
+ */
+type BunFetchInit = RequestInit & {
+  unix?: string;
+  tls?: { rejectUnauthorized?: boolean };
+};
+
+/**
+ * A self-signed certificate needs openssl. Where it is missing the TLS test
+ * skips rather than failing - an absent tool is not a defect in the adapter.
+ */
+const opensslPath = isBun ? Bun.which("openssl") : null;
+const itIfOpenssl = opensslPath ? it : it.skip;
 
 describeIfBun("BunAdapter E2E", () => {
   let adapter: BunAdapter;
@@ -206,7 +225,24 @@ describeIfBun("BunAdapter E2E", () => {
 
       const response = await fetch(`${baseUrl}/search/${encodeURIComponent("hello world")}`);
       const body = await response.json();
-      expect(body.query).toBe("hello%20world");
+      // Route params arrive decoded, matching what @Param() yields under the
+      // Express and Fastify adapters. This previously returned the raw escape.
+      expect(body.query).toBe("hello world");
+    });
+
+    it("should not crash on a malformed percent-escape in a parameter", async () => {
+      adapter.get("/search/:query", (req, res) => {
+        res.json({ query: req.params.query });
+      });
+
+      await adapter.listen(0);
+      const port = adapter.getHttpServer().server?.port;
+      baseUrl = `http://localhost:${port}`;
+
+      const response = await fetch(`${baseUrl}/search/%E0%A4%A`);
+      expect(response.status).toBe(200);
+      const body = await response.json();
+      expect(body.query).toBe("%E0%A4%A");
     });
   });
 
@@ -939,6 +975,223 @@ describeIfBun("BunAdapter E2E", () => {
       expect(bodies).toContainEqual({ delayed: 50 });
       expect(bodies).toContainEqual({ delayed: 30 });
       expect(bodies).toContainEqual({ delayed: 10 });
+    });
+  });
+
+  describe("Bun.serve option plumbing", () => {
+    it("should serve over a unix socket instead of a TCP port", async () => {
+      const socketPath = join(tmpdir(), `bun-adapter-${crypto.randomUUID()}.sock`);
+      adapter.setServerOptions({ unix: socketPath });
+      adapter.get("/ping", (req, res) => res.send("pong"));
+
+      try {
+        await adapter.listen(0);
+
+        // Host is ignored when `unix` is set; Bun dials the socket path.
+        const response = await fetch("http://localhost/ping", {
+          unix: socketPath,
+        } as BunFetchInit);
+
+        expect(response.status).toBe(200);
+        expect(await response.text()).toBe("pong");
+      } finally {
+        await adapter.close();
+        if (existsSync(socketPath)) unlinkSync(socketPath);
+      }
+    });
+
+    it("should reject a body larger than maxRequestBodySize", async () => {
+      adapter.setServerOptions({ maxRequestBodySize: 16 });
+      adapter.post("/upload", (req, res) => res.send("accepted"));
+
+      await adapter.listen(0);
+      const port = adapter.getHttpServer().server?.port;
+
+      const response = await fetch(`http://localhost:${port}/upload`, {
+        method: "POST",
+        headers: { "Content-Type": "text/plain" },
+        body: "x".repeat(1024),
+      });
+
+      // Bun refuses the request at the transport layer; the handler never runs.
+      expect(response.status).toBe(413);
+    });
+
+    it("should still accept a body within maxRequestBodySize", async () => {
+      adapter.setServerOptions({ maxRequestBodySize: 1024 });
+      adapter.post("/upload", (req, res) => res.send("accepted"));
+
+      await adapter.listen(0);
+      const port = adapter.getHttpServer().server?.port;
+
+      const response = await fetch(`http://localhost:${port}/upload`, {
+        method: "POST",
+        headers: { "Content-Type": "text/plain" },
+        body: "x".repeat(16),
+      });
+
+      expect(response.status).toBe(200);
+      expect(await response.text()).toBe("accepted");
+    });
+
+    it("should forward development and lowMemoryMode without breaking the server", async () => {
+      // NOTE: `lowMemoryMode: true` is deliberately NOT exercised here. On Bun
+      // 1.3.14 a bare `Bun.serve({ lowMemoryMode: true })` resets every
+      // connection (ECONNRESET) with no adapter involved, so asserting a
+      // working request under it would encode a runtime defect as expected
+      // behaviour. Only the forwarding is covered.
+      adapter.setServerOptions({ development: false, lowMemoryMode: false });
+      adapter.get("/opts", (req, res) => res.send("served"));
+
+      await adapter.listen(0);
+      const port = adapter.getHttpServer().server?.port;
+
+      const response = await fetch(`http://localhost:${port}/opts`);
+
+      expect(response.status).toBe(200);
+      expect(await response.text()).toBe("served");
+    });
+
+    itIfOpenssl("should serve over TLS when serverOptions.tls is supplied", async () => {
+      const certDir = mkdtempSync(join(tmpdir(), "bun-adapter-tls-"));
+      const keyPath = join(certDir, "k.pem");
+      const certPath = join(certDir, "c.pem");
+
+      try {
+        const generated = Bun.spawnSync([
+          opensslPath as string,
+          "req",
+          "-x509",
+          "-newkey",
+          "rsa:2048",
+          "-nodes",
+          "-keyout",
+          keyPath,
+          "-out",
+          certPath,
+          "-days",
+          "1",
+          "-subj",
+          "/CN=localhost",
+        ]);
+        expect(generated.exitCode).toBe(0);
+
+        adapter.setServerOptions({
+          tls: { key: readFileSync(keyPath), cert: readFileSync(certPath) },
+        });
+        adapter.get("/secure", (req, res) => res.send("over-tls"));
+
+        await adapter.listen(0, "127.0.0.1");
+        const port = adapter.getHttpServer().server?.port;
+
+        const response = await fetch(`https://127.0.0.1:${port}/secure`, {
+          tls: { rejectUnauthorized: false },
+        } as BunFetchInit);
+
+        expect(response.status).toBe(200);
+        expect(await response.text()).toBe("over-tls");
+      } finally {
+        rmSync(certDir, { recursive: true, force: true });
+      }
+    });
+
+    itIfOpenssl("should derive TLS from NestJS httpsOptions", async () => {
+      const certDir = mkdtempSync(join(tmpdir(), "bun-adapter-https-"));
+      const keyPath = join(certDir, "k.pem");
+      const certPath = join(certDir, "c.pem");
+
+      try {
+        const generated = Bun.spawnSync([
+          opensslPath as string,
+          "req",
+          "-x509",
+          "-newkey",
+          "rsa:2048",
+          "-nodes",
+          "-keyout",
+          keyPath,
+          "-out",
+          certPath,
+          "-days",
+          "1",
+          "-subj",
+          "/CN=localhost",
+        ]);
+        expect(generated.exitCode).toBe(0);
+
+        // This is the path `NestFactory.create(AppModule, adapter, { httpsOptions })`
+        // takes; it must reach Bun's `tls` option or the app serves plaintext.
+        adapter.initHttpServer({
+          httpsOptions: { key: readFileSync(keyPath), cert: readFileSync(certPath) },
+        });
+        adapter.get("/secure", (req, res) => res.send("https-options"));
+
+        await adapter.listen(0, "127.0.0.1");
+        const port = adapter.getHttpServer().server?.port;
+
+        const response = await fetch(`https://127.0.0.1:${port}/secure`, {
+          tls: { rejectUnauthorized: false },
+        } as BunFetchInit);
+
+        expect(response.status).toBe(200);
+        expect(await response.text()).toBe("https-options");
+      } finally {
+        rmSync(certDir, { recursive: true, force: true });
+      }
+    });
+
+    it("should NOT enable TLS when httpsOptions carries neither key nor cert", async () => {
+      // The silent-plaintext path: an httpsOptions object that configures
+      // nothing must leave the server on plain HTTP rather than half-configure
+      // TLS. Plain http answering is the proof that no TLS was installed.
+      adapter.initHttpServer({ httpsOptions: { passphrase: "unused" } });
+      adapter.get("/plain", (req, res) => res.send("plaintext"));
+
+      await adapter.listen(0);
+      const port = adapter.getHttpServer().server?.port;
+
+      const response = await fetch(`http://localhost:${port}/plain`);
+
+      expect(response.status).toBe(200);
+      expect(await response.text()).toBe("plaintext");
+    });
+
+    it("should re-point a caller-supplied server at the adapter rather than starting a second one", async () => {
+      // The supplied instance used to be overwritten, so it kept serving
+      // whatever it was built with while the adapter listened elsewhere.
+      const existing = Bun.serve({ port: 0, fetch: () => new Response("old") });
+      const originalPort = existing.port;
+      const externalAdapter = new BunAdapter(existing);
+      externalAdapter.get("/adopted", (req, res) => res.send("served by adapter"));
+
+      try {
+        await externalAdapter.listen(0);
+
+        const response = await fetch(`http://localhost:${originalPort}/adopted`);
+
+        expect(response.status).toBe(200);
+        expect(await response.text()).toBe("served by adapter");
+        // No second server: the adapter still owns the original port.
+        expect(externalAdapter.getHttpServer().server?.port).toBe(originalPort);
+      } finally {
+        await externalAdapter.close();
+      }
+    });
+
+    it("should invoke the listen callback when adopting an external server", async () => {
+      const existing = Bun.serve({ port: 0, fetch: () => new Response("old") });
+      const externalAdapter = new BunAdapter(existing);
+      let called = false;
+
+      try {
+        await externalAdapter.listen(0, () => {
+          called = true;
+        });
+
+        expect(called).toBe(true);
+      } finally {
+        await externalAdapter.close();
+      }
     });
   });
 });
