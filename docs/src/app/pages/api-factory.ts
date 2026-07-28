@@ -1,10 +1,11 @@
 import { Component } from '@angular/core';
 import { CommonModule } from '@angular/common';
+import { RouterLink } from '@angular/router';
 
 @Component({
   selector: 'app-api-factory',
   standalone: true,
-  imports: [CommonModule],
+  imports: [CommonModule, RouterLink],
   template: `
     <article class="max-w-4xl mx-auto px-6 py-12 animate-fade-in">
       <h1 class="text-4xl font-bold mb-4">NestBunFactory</h1>
@@ -54,7 +55,7 @@ import { CommonModule } from '@angular/common';
 
         <h3 class="text-lg font-semibold mb-3">Example</h3>
         <div class="bg-bg-code rounded-lg border border-border p-4 overflow-x-auto">
-          <pre><code class="text-sm"><span class="token-keyword">import</span> &#123; NestBunFactory &#125; <span class="token-keyword">from</span> <span class="token-string">'@pegasusheavy/nestjs-platform-bun'</span>;
+          <pre><code class="text-sm"><span class="token-keyword">import</span> &#123; NestBunFactory &#125; <span class="token-keyword">from</span> <span class="token-string">'@lexmata/nestjs-platform-bun'</span>;
 <span class="token-keyword">import</span> &#123; AppModule &#125; <span class="token-keyword">from</span> <span class="token-string">'./app.module'</span>;
 
 <span class="token-keyword">const</span> app = <span class="token-keyword">await</span> NestBunFactory.<span class="token-function">create</span>(AppModule, &#123;
@@ -92,6 +93,25 @@ import { CommonModule } from '@angular/common';
               }
             </tbody>
           </table>
+        </div>
+
+        <h3 class="text-lg font-semibold mt-8 mb-3">Options with no effect</h3>
+        <p class="text-text-secondary mb-4">
+          These are accepted by the type but ignored at runtime. Full detail on the
+          <a routerLink="/api/config" class="text-nest-red hover:underline">Configuration</a> page.
+        </p>
+        <div class="space-y-3">
+          @for (item of ignoredOptions; track item.name) {
+            <div class="p-4 bg-bg-tertiary rounded-lg border border-border">
+              <div class="flex items-start gap-3">
+                <span class="text-yellow-400 mt-0.5">⚠</span>
+                <div>
+                  <code class="text-nest-red font-mono text-sm">{{ item.name }}</code>
+                  <p class="text-text-secondary text-sm mt-1">{{ item.reason }}</p>
+                </div>
+              </div>
+            </div>
+          }
         </div>
       </section>
 
@@ -140,12 +160,16 @@ import { CommonModule } from '@angular/common';
 })
 export class ApiFactoryComponent {
   options = [
-    { name: 'logger', type: 'LogLevel[] | false | LoggerService', default: 'true', description: 'Configure logging behavior' },
+    { name: 'logger', type: 'LogLevel[] | false | LoggerService', default: 'all levels', description: 'Configure logging behaviour' },
     { name: 'cors', type: 'boolean | CorsOptions', default: 'false', description: 'Enable and configure CORS' },
-    { name: 'bodyParser', type: 'boolean', default: 'true', description: 'Enable automatic body parsing' },
-    { name: 'rawBody', type: 'boolean', default: 'false', description: 'Include raw body in request' },
     { name: 'abortOnError', type: 'boolean', default: 'true', description: 'Abort bootstrap on first error' },
-    { name: 'httpsOptions', type: 'TlsOptions', default: 'undefined', description: 'HTTPS/TLS configuration' },
+    { name: 'rawBody', type: 'boolean', default: 'false', description: 'Also expose the untouched bytes on req.rawBody as a Buffer' },
+    { name: 'httpsOptions', type: 'TlsOptions', default: 'undefined', description: "TLS key/cert, mapped onto Bun's tls option" },
+    { name: 'serverOptions', type: 'BunServerOptions', default: 'undefined', description: 'Bun server settings forwarded to Bun.serve()' },
+  ];
+
+  ignoredOptions = [
+    { name: 'bodyParser', reason: 'Overridden to false by the factory and ignored by the adapter, which always parses bodies natively. Body parsing cannot be disabled.' },
   ];
 
   returnMethods = [

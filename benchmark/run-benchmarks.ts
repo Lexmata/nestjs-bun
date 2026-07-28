@@ -1,196 +1,133 @@
-import { spawn, ChildProcess } from "child_process";
-import autocannon from "autocannon";
+#!/usr/bin/env tsx
+/**
+ * NestJS adapter benchmark suite.
+ *
+ * Boots each adapter (Express, Fastify, Bun) out-of-process and sequentially,
+ * validates that every endpoint actually returns the response it is supposed to
+ * return, then measures each endpoint several times and reports the median plus
+ * the run-to-run spread.
+ *
+ * The harness is deliberately noisy about failure: a server that will not boot,
+ * an endpoint that returns the wrong body, or any non-2xx response during a run
+ * fails the whole process with a non-zero exit code. A benchmark that cannot
+ * tell you it measured the wrong thing is worse than no benchmark.
+ *
+ * Tunables (all optional environment variables):
+ *   BENCH_RUNS             measurement runs per endpoint      (default 3)
+ *   BENCH_DURATION         seconds per measurement run        (default 5)
+ *   BENCH_WARMUP           seconds of warmup per endpoint     (default 3)
+ *   BENCH_CONNECTIONS      concurrent connections             (default 100)
+ *   BENCH_PIPELINING       pipelined requests per connection  (default 10)
+ *   BENCH_WORKERS          autocannon worker threads          (default: half the CPUs, 2..4)
+ *   BENCH_BOOT_TIMEOUT_MS  server boot timeout                (default 60000)
+ */
 
-// Configuration
-const WARMUP_DURATION = 3; // seconds
-const BENCHMARK_DURATION = 10; // seconds
-const CONNECTIONS = 100;
-const PIPELINING = 10;
+import { cpus } from "node:os";
+import {
+  buildAdapters,
+  describeFailures,
+  endpoints,
+  envInt,
+  formatBytes,
+  formatNumber,
+  formatRelative,
+  relativeTo,
+  runAutocannon,
+  startServer,
+  stopServer,
+  validateEndpoints,
+  waitForServer,
+  type AutocannonResult,
+  type EndpointSpec,
+} from "./harness";
+
+const RUNS = envInt("BENCH_RUNS", 3);
+const BENCHMARK_DURATION = envInt("BENCH_DURATION", 5);
+const WARMUP_DURATION = envInt("BENCH_WARMUP", 3);
+const CONNECTIONS = envInt("BENCH_CONNECTIONS", 100);
+const PIPELINING = envInt("BENCH_PIPELINING", 10);
+const DEFAULT_WORKERS = Math.max(2, Math.min(4, Math.floor(cpus().length / 2)));
+const WORKERS = envInt("BENCH_WORKERS", DEFAULT_WORKERS);
+const BOOT_TIMEOUT_MS = envInt("BENCH_BOOT_TIMEOUT_MS", 60_000);
+
+const adapters = buildAdapters(4000);
+
+interface RunSample {
+  reqPerSec: number;
+  latencyAvg: number;
+  latencyP99: number;
+  throughputAvg: number;
+  totalRequests: number;
+  errors: number;
+  timeouts: number;
+  non2xx: number;
+}
 
 interface BenchmarkResult {
   adapter: string;
   endpoint: string;
-  requests: number;
-  latency: {
-    avg: number;
-    p50: number;
-    p99: number;
-    max: number;
+  samples: RunSample[];
+  median: RunSample;
+  /** (max - min) / median, as a percentage. A proxy for run-to-run stability. */
+  spreadPct: number;
+}
+
+/** Load settings for a measurement run. Warmup overrides `connections`. */
+const LOAD = {
+  duration: BENCHMARK_DURATION,
+  connections: CONNECTIONS,
+  pipelining: PIPELINING,
+  workers: WORKERS,
+};
+
+function toSample(result: AutocannonResult): RunSample {
+  return {
+    reqPerSec: result.requests.average,
+    latencyAvg: result.latency.average,
+    latencyP99: result.latency.p99,
+    throughputAvg: result.throughput.average,
+    totalRequests: result.requests.total,
+    errors: result.errors,
+    timeouts: result.timeouts,
+    non2xx: result.non2xx,
   };
-  throughput: {
-    avg: number;
-    total: number;
-  };
-  errors: number;
-  timeouts: number;
 }
 
-interface AdapterConfig {
-  name: string;
-  command: string;
-  args: string[];
-  port: number;
-  env?: Record<string, string>;
-}
-
-const adapters: AdapterConfig[] = [
-  {
-    name: "Express",
-    command: "npx",
-    args: ["tsx", "apps/express-app.ts"],
-    port: 4001,
-    env: { PORT: "4001" },
-  },
-  {
-    name: "Fastify",
-    command: "npx",
-    args: ["tsx", "apps/fastify-app.ts"],
-    port: 4002,
-    env: { PORT: "4002" },
-  },
-  {
-    name: "Bun",
-    command: "bun",
-    args: ["apps/bun-app.ts"],
-    port: 4003,
-    env: { PORT: "4003" },
-  },
-];
-
-const endpoints = [
-  { path: "/", name: "Hello World (text)" },
-  { path: "/json", name: "JSON Response" },
-  { path: "/users/123", name: "Path Parameter" },
-  { path: "/health", name: "Health Check" },
-  { path: "/cpu/light", name: "CPU Light (fib 20)" },
-];
-
-const postEndpoints = [
-  {
-    path: "/items",
-    name: "POST JSON Body",
-    body: JSON.stringify({ name: "Test Item", value: 42 }),
-    headers: { "Content-Type": "application/json" },
-  },
-];
-
-async function sleep(ms: number): Promise<void> {
-  return new Promise((resolve) => setTimeout(resolve, ms));
-}
-
-async function waitForServer(port: number, maxAttempts = 30): Promise<boolean> {
-  for (let i = 0; i < maxAttempts; i++) {
-    try {
-      const response = await fetch(`http://localhost:${port}/health`);
-      if (response.ok) {
-        return true;
-      }
-    } catch {
-      // Server not ready yet
-    }
-    await sleep(100);
-  }
-  return false;
-}
-
-function startServer(config: AdapterConfig): ChildProcess {
-  const proc = spawn(config.command, config.args, {
-    cwd: process.cwd(),
-    env: { ...process.env, ...config.env },
-    stdio: ["ignore", "pipe", "pipe"],
-    shell: true,
-  });
-
-  let stderr = "";
-
-  proc.stdout?.on("data", (data) => {
-    const output = data.toString();
-    if (output.includes("listening")) {
-      console.log(`    ${output.trim()}`);
-    }
-  });
-
-  proc.stderr?.on("data", (data) => {
-    stderr += data.toString();
-  });
-
-  proc.on("exit", (code) => {
-    if (code !== 0 && code !== null && stderr) {
-      console.error(`    Server error: ${stderr.split("\n")[0]}`);
-    }
-  });
-
-  return proc;
-}
-
-async function runBenchmark(
-  url: string,
-  options: {
-    method?: string;
-    body?: string;
-    headers?: Record<string, string>;
-  } = {}
-): Promise<autocannon.Result> {
-  return new Promise((resolve, reject) => {
-    const instance = autocannon(
-      {
-        url,
-        connections: CONNECTIONS,
-        pipelining: PIPELINING,
-        duration: BENCHMARK_DURATION,
-        method: (options.method as autocannon.Request["method"]) ?? "GET",
-        body: options.body,
-        headers: options.headers,
-      },
-      (err, result) => {
-        if (err) reject(err);
-        else resolve(result);
-      }
-    );
-
-    // Suppress autocannon output
-    autocannon.track(instance, { renderProgressBar: false });
+/**
+ * Warm up using the *same* method, body and headers the measurement will use.
+ * A GET-only warmup leaves the body-parsing path of a POST benchmark cold, so
+ * the POST numbers would measure first-call deoptimisation rather than steady
+ * state.
+ */
+async function warmup(port: number, spec: EndpointSpec): Promise<void> {
+  if (WARMUP_DURATION === 0) return;
+  await runAutocannon(`http://localhost:${port}${spec.path}`, spec, {
+    ...LOAD,
+    duration: WARMUP_DURATION,
+    connections: 10,
   });
 }
 
-async function warmup(port: number, path: string): Promise<void> {
-  return new Promise((resolve, reject) => {
-    const instance = autocannon(
-      {
-        url: `http://localhost:${port}${path}`,
-        connections: 10,
-        duration: WARMUP_DURATION,
-      },
-      (err) => {
-        if (err) reject(err);
-        else resolve();
-      }
-    );
-    autocannon.track(instance, { renderProgressBar: false });
-  });
+function median(values: number[]): number {
+  const sorted = [...values].sort((a, b) => a - b);
+  const mid = Math.floor(sorted.length / 2);
+  return sorted.length % 2 === 0 ? (sorted[mid - 1]! + sorted[mid]!) / 2 : sorted[mid]!;
 }
 
-function formatNumber(num: number): string {
-  return num.toLocaleString("en-US", { maximumFractionDigits: 2 });
+/** The sample whose req/sec is the median of the set - an actual observation, not a synthetic average. */
+function medianSample(samples: RunSample[]): RunSample {
+  const sorted = [...samples].sort((a, b) => a.reqPerSec - b.reqPerSec);
+  return sorted[Math.floor((sorted.length - 1) / 2)]!;
 }
 
-function formatBytes(bytes: number): string {
-  const units = ["B", "KB", "MB", "GB"];
-  let size = bytes;
-  let unitIndex = 0;
-  while (size >= 1024 && unitIndex < units.length - 1) {
-    size /= 1024;
-    unitIndex++;
-  }
-  return `${formatNumber(size)} ${units[unitIndex]}`;
-}
+const RULE = "=".repeat(120);
+const THIN_RULE = "-".repeat(120);
 
 function printResults(results: BenchmarkResult[]): void {
-  console.log("\n" + "=".repeat(100));
-  console.log("BENCHMARK RESULTS");
-  console.log("=".repeat(100));
+  console.log("\n" + RULE);
+  console.log("BENCHMARK RESULTS (median of " + RUNS + " runs)");
+  console.log(RULE);
 
-  // Group by endpoint
   const byEndpoint = new Map<string, BenchmarkResult[]>();
   for (const result of results) {
     const existing = byEndpoint.get(result.endpoint) ?? [];
@@ -199,163 +136,183 @@ function printResults(results: BenchmarkResult[]): void {
   }
 
   for (const [endpoint, endpointResults] of byEndpoint) {
-    console.log(`\n📊 ${endpoint}`);
-    console.log("-".repeat(100));
+    console.log(`\n${endpoint}`);
+    console.log(THIN_RULE);
     console.log(
-      "| Adapter  | Req/sec    | Avg Latency | P99 Latency | Throughput  | Errors | vs Express | vs Fastify |"
+      "| Adapter  | Req/sec    | Spread | Avg Latency | P99 Latency | Throughput  | Errors | non-2xx | vs Express | vs Fastify |"
     );
-    console.log("-".repeat(100));
+    console.log(THIN_RULE);
 
-    // Sort by requests per second (highest first)
-    endpointResults.sort((a, b) => b.requests - a.requests);
+    endpointResults.sort((a, b) => b.median.reqPerSec - a.median.reqPerSec);
 
-    const expressResult = endpointResults.find((r) => r.adapter === "Express");
-    const fastifyResult = endpointResults.find((r) => r.adapter === "Fastify");
+    const expressBaseline = endpointResults.find((r) => r.adapter === "Express")?.median.reqPerSec ?? null;
+    const fastifyBaseline = endpointResults.find((r) => r.adapter === "Fastify")?.median.reqPerSec ?? null;
 
     for (const result of endpointResults) {
-      const reqPerSec = result.requests / BENCHMARK_DURATION;
-      const expressReqPerSec = expressResult ? expressResult.requests / BENCHMARK_DURATION : 0;
-      const fastifyReqPerSec = fastifyResult ? fastifyResult.requests / BENCHMARK_DURATION : 0;
-
-      const vsExpress = expressReqPerSec > 0 ? ((reqPerSec / expressReqPerSec - 1) * 100).toFixed(1) : "N/A";
-      const vsFastify = fastifyReqPerSec > 0 ? ((reqPerSec / fastifyReqPerSec - 1) * 100).toFixed(1) : "N/A";
-
-      const vsExpressStr = typeof vsExpress === "string" ? vsExpress : `${vsExpress > 0 ? "+" : ""}${vsExpress}%`;
-      const vsFastifyStr = typeof vsFastify === "string" ? vsFastify : `${vsFastify > 0 ? "+" : ""}${vsFastify}%`;
-
+      const m = result.median;
       console.log(
-        `| ${result.adapter.padEnd(8)} | ${formatNumber(reqPerSec).padStart(10)} | ${(result.latency.avg.toFixed(2) + " ms").padStart(11)} | ${(result.latency.p99.toFixed(2) + " ms").padStart(11)} | ${formatBytes(result.throughput.avg).padStart(11)} | ${String(result.errors).padStart(6)} | ${vsExpressStr.padStart(10)} | ${vsFastifyStr.padStart(10)} |`
+        `| ${result.adapter.padEnd(8)}` +
+          ` | ${formatNumber(m.reqPerSec).padStart(10)}` +
+          ` | ${(result.spreadPct.toFixed(1) + "%").padStart(6)}` +
+          ` | ${(m.latencyAvg.toFixed(2) + " ms").padStart(11)}` +
+          ` | ${(m.latencyP99.toFixed(2) + " ms").padStart(11)}` +
+          ` | ${formatBytes(m.throughputAvg).padStart(11)}` +
+          ` | ${String(m.errors).padStart(6)}` +
+          ` | ${String(m.non2xx).padStart(7)}` +
+          ` | ${formatRelative(relativeTo(m.reqPerSec, expressBaseline)).padStart(10)}` +
+          ` | ${formatRelative(relativeTo(m.reqPerSec, fastifyBaseline)).padStart(10)} |`
       );
     }
   }
 
-  // Summary
-  console.log("\n" + "=".repeat(100));
+  console.log("\n" + RULE);
   console.log("SUMMARY");
-  console.log("=".repeat(100));
+  console.log(RULE);
 
-  const bunResults = results.filter((r) => r.adapter === "Bun");
-  const expressResults = results.filter((r) => r.adapter === "Express");
-  const fastifyResults = results.filter((r) => r.adapter === "Fastify");
+  const totalFor = (adapter: string): number =>
+    results.filter((r) => r.adapter === adapter).reduce((sum, r) => sum + r.median.totalRequests, 0);
 
-  const bunTotal = bunResults.reduce((sum, r) => sum + r.requests, 0);
-  const expressTotal = expressResults.reduce((sum, r) => sum + r.requests, 0);
-  const fastifyTotal = fastifyResults.reduce((sum, r) => sum + r.requests, 0);
+  const bunTotal = totalFor("Bun");
+  const expressTotal = totalFor("Express");
+  const fastifyTotal = totalFor("Fastify");
 
-  console.log(`\nTotal requests across all benchmarks:`);
-  console.log(`  🚀 Bun:     ${formatNumber(bunTotal)} requests`);
-  console.log(`  ⚡ Fastify: ${formatNumber(fastifyTotal)} requests`);
-  console.log(`  📦 Express: ${formatNumber(expressTotal)} requests`);
+  console.log("\nTotal requests across all benchmarked endpoints (median run of each):");
+  console.log(`  Bun:     ${formatNumber(bunTotal)} requests`);
+  console.log(`  Fastify: ${formatNumber(fastifyTotal)} requests`);
+  console.log(`  Express: ${formatNumber(expressTotal)} requests`);
 
-  if (bunTotal > expressTotal) {
-    const improvement = ((bunTotal / expressTotal - 1) * 100).toFixed(1);
-    console.log(`\n✅ Bun is ${improvement}% faster than Express overall`);
-  }
+  const vsExpress = relativeTo(bunTotal, expressTotal > 0 ? expressTotal : null);
+  const vsFastify = relativeTo(bunTotal, fastifyTotal > 0 ? fastifyTotal : null);
 
-  if (bunTotal > fastifyTotal) {
-    const improvement = ((bunTotal / fastifyTotal - 1) * 100).toFixed(1);
-    console.log(`✅ Bun is ${improvement}% faster than Fastify overall`);
-  }
+  console.log(
+    vsExpress === null
+      ? "\nNo Express baseline was recorded - no comparison is possible."
+      : `\nBun vs Express (aggregate): ${formatRelative(vsExpress)}`
+  );
+  console.log(
+    vsFastify === null
+      ? "No Fastify baseline was recorded - no comparison is possible."
+      : `Bun vs Fastify (aggregate): ${formatRelative(vsFastify)}`
+  );
 
-  console.log("\n" + "=".repeat(100));
+  console.log("\n" + RULE);
 }
 
 async function main(): Promise<void> {
-  console.log("🏁 NestJS Adapter Benchmark Suite");
-  console.log("==================================\n");
-  console.log(`Configuration:`);
-  console.log(`  - Warmup duration: ${WARMUP_DURATION}s`);
-  console.log(`  - Benchmark duration: ${BENCHMARK_DURATION}s`);
-  console.log(`  - Connections: ${CONNECTIONS}`);
-  console.log(`  - Pipelining: ${PIPELINING}`);
+  if (RUNS < 1) throw new Error("BENCH_RUNS must be at least 1");
+  if (BENCHMARK_DURATION < 1) throw new Error("BENCH_DURATION must be at least 1");
+
+  console.log("NestJS Adapter Benchmark Suite");
+  console.log("==============================\n");
+  console.log("Configuration:");
+  console.log(`  - Warmup duration:     ${WARMUP_DURATION}s per endpoint`);
+  console.log(`  - Measurement runs:    ${RUNS} x ${BENCHMARK_DURATION}s per endpoint`);
+  console.log(`  - Connections:         ${CONNECTIONS}`);
+  console.log(`  - Pipelining:          ${PIPELINING}`);
+  console.log(`  - autocannon workers:  ${WORKERS}`);
+  console.log(`  - Boot timeout:        ${BOOT_TIMEOUT_MS}ms`);
+  console.log(`  - Node:                ${process.version}`);
+  console.log(`  - Platform:            ${process.platform}/${process.arch} (${cpus().length} CPUs)`);
+  console.log(`  - Date:                ${new Date().toISOString()}`);
   console.log("");
 
   const results: BenchmarkResult[] = [];
+  const failures: string[] = [];
+  const expectedResultCount = adapters.length * endpoints.length;
 
   for (const adapter of adapters) {
-    console.log(`\n🚀 Starting ${adapter.name} server on port ${adapter.port}...`);
+    console.log(`\nStarting ${adapter.name} server on port ${adapter.port}...`);
 
     const server = startServer(adapter);
-    const ready = await waitForServer(adapter.port);
+    const bootError = await waitForServer(adapter.port, BOOT_TIMEOUT_MS);
 
-    if (!ready) {
-      console.error(`❌ Failed to start ${adapter.name} server`);
-      server.kill();
+    if (bootError) {
+      failures.push(`${adapter.name} server failed to start: ${bootError}`);
+      console.error(`FAILED to start ${adapter.name}: ${bootError}`);
+      await stopServer(server, adapter.port);
       continue;
     }
 
-    console.log(`✅ ${adapter.name} server is ready`);
+    console.log(`${adapter.name} server is ready`);
 
-    // Run GET benchmarks
-    for (const endpoint of endpoints) {
-      console.log(`  📈 Benchmarking ${endpoint.name}...`);
+    // Correctness gate: never benchmark an endpoint whose response is wrong.
+    const problems = await validateEndpoints(adapter.name, adapter.port, endpoints);
+    if (problems.length > 0) {
+      failures.push(...problems);
+      for (const problem of problems) console.error(`  INVALID RESPONSE: ${problem}`);
+      await stopServer(server, adapter.port);
+      continue;
+    }
+    console.log(`  All ${endpoints.length} endpoints returned the expected responses`);
 
-      // Warmup
-      await warmup(adapter.port, endpoint.path);
+    for (const spec of endpoints) {
+      process.stdout.write(`  Benchmarking ${spec.name}...`);
 
-      // Benchmark
-      const result = await runBenchmark(`http://localhost:${adapter.port}${endpoint.path}`);
+      await warmup(adapter.port, spec);
 
-      results.push({
-        adapter: adapter.name,
-        endpoint: endpoint.name,
-        requests: result.requests.total,
-        latency: {
-          avg: result.latency.average,
-          p50: result.latency.p50,
-          p99: result.latency.p99,
-          max: result.latency.max,
-        },
-        throughput: {
-          avg: result.throughput.average,
-          total: result.throughput.total,
-        },
-        errors: result.errors,
-        timeouts: result.timeouts,
+      const samples: RunSample[] = [];
+      for (let run = 0; run < RUNS; run++) {
+        const result = await runAutocannon(`http://localhost:${adapter.port}${spec.path}`, spec, LOAD);
+        samples.push(toSample(result));
+      }
+
+      const reqPerSecs = samples.map((s) => s.reqPerSec);
+      const med = medianSample(samples);
+      const medValue = median(reqPerSecs);
+      const spreadPct = medValue > 0 ? ((Math.max(...reqPerSecs) - Math.min(...reqPerSecs)) / medValue) * 100 : 0;
+
+      const totalNon2xx = samples.reduce((sum, s) => sum + s.non2xx, 0);
+      const totalErrors = samples.reduce((sum, s) => sum + s.errors, 0);
+      const totalTimeouts = samples.reduce((sum, s) => sum + s.timeouts, 0);
+
+      console.log(
+        ` ${formatNumber(med.reqPerSec)} req/s` +
+          ` (spread ${spreadPct.toFixed(1)}%, non-2xx ${totalNon2xx}, errors ${totalErrors}, timeouts ${totalTimeouts})`
+      );
+
+      // All three counters, not just non2xx. A connection that was reset or that
+      // timed out never produces a status code, so non2xx alone stays 0 while
+      // the requests that did complete inflate the median req/s.
+      const failure = describeFailures({
+        non2xx: totalNon2xx,
+        errors: totalErrors,
+        timeouts: totalTimeouts,
       });
+      if (failure) {
+        failures.push(
+          `${adapter.name} ${spec.method} ${spec.path}: ${failure} during measurement - the numbers are not comparable`
+        );
+      }
+
+      results.push({ adapter: adapter.name, endpoint: spec.name, samples, median: med, spreadPct });
     }
 
-    // Run POST benchmarks
-    for (const endpoint of postEndpoints) {
-      console.log(`  📈 Benchmarking ${endpoint.name}...`);
-
-      // Warmup
-      await warmup(adapter.port, endpoint.path);
-
-      // Benchmark
-      const result = await runBenchmark(`http://localhost:${adapter.port}${endpoint.path}`, {
-        method: "POST",
-        body: endpoint.body,
-        headers: endpoint.headers,
-      });
-
-      results.push({
-        adapter: adapter.name,
-        endpoint: endpoint.name,
-        requests: result.requests.total,
-        latency: {
-          avg: result.latency.average,
-          p50: result.latency.p50,
-          p99: result.latency.p99,
-          max: result.latency.max,
-        },
-        throughput: {
-          avg: result.throughput.average,
-          total: result.throughput.total,
-        },
-        errors: result.errors,
-        timeouts: result.timeouts,
-      });
-    }
-
-    // Stop server
-    console.log(`  🛑 Stopping ${adapter.name} server...`);
-    server.kill();
-    await sleep(500);
+    console.log(`  Stopping ${adapter.name} server...`);
+    await stopServer(server, adapter.port);
   }
 
-  // Print results
-  printResults(results);
+  if (results.length > 0) printResults(results);
+
+  if (results.length !== expectedResultCount) {
+    failures.push(
+      `Only ${results.length} of ${expectedResultCount} adapter/endpoint measurements completed - the comparison is incomplete`
+    );
+  }
+
+  if (failures.length > 0) {
+    console.error("\n" + RULE);
+    console.error("BENCHMARK FAILED");
+    console.error(RULE);
+    for (const failure of failures) console.error(`  - ${failure}`);
+    console.error("");
+    process.exitCode = 1;
+    return;
+  }
+
+  console.log("\nAll adapters measured successfully.");
 }
 
-main().catch(console.error);
+main().catch((err) => {
+  console.error("Benchmark harness crashed:", err);
+  process.exit(1);
+});

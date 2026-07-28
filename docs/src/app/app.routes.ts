@@ -47,12 +47,14 @@ export const routes: Routes = [
         loadComponent: () => import('./pages/api-factory').then(m => m.ApiFactoryComponent),
       },
       {
-        path: 'api/adapter',
-        loadComponent: () => import('./pages/adapter').then(m => m.AdapterComponent),
-      },
-      {
         path: 'api/config',
-        loadComponent: () => import('./pages/api-factory').then(m => m.ApiFactoryComponent),
+        loadComponent: () => import('./pages/configuration').then(m => m.ConfigurationComponent),
+      },
+      // Legacy alias — the BunAdapter reference lives at /adapter.
+      {
+        path: 'api/adapter',
+        redirectTo: 'adapter',
+        pathMatch: 'full',
       },
       {
         path: '**',

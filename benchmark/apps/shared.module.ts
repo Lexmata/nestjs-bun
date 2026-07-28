@@ -1,4 +1,4 @@
-import { Module, Controller, Get, Post, Body, Param, Injectable } from "@nestjs/common";
+import { Module, Controller, Get, Post, Body, Param, Injectable, Inject } from "@nestjs/common";
 
 /**
  * Simple service for benchmark testing
@@ -54,7 +54,15 @@ export class BenchmarkService {
  */
 @Controller()
 export class BenchmarkController {
-  constructor(private readonly service: BenchmarkService) {}
+  // The token is stated explicitly rather than inferred from `design:paramtypes`.
+  //
+  // The Express and Fastify apps run under tsx, and esbuild (which tsx uses)
+  // does not implement `emitDecoratorMetadata` - so type-inferred DI silently
+  // resolves to `undefined` and every service-backed route returns HTTP 500.
+  // Bun's transpiler *does* emit the metadata, so relying on inference would
+  // compare a working Bun app against two permanently broken baselines.
+  // Explicit injection makes all three adapters behave identically.
+  constructor(@Inject(BenchmarkService) private readonly service: BenchmarkService) {}
 
   // Simple text response
   @Get()

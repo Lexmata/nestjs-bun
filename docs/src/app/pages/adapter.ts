@@ -1,10 +1,11 @@
 import { Component } from '@angular/core';
 import { CommonModule } from '@angular/common';
+import { RouterLink } from '@angular/router';
 
 @Component({
   selector: 'app-adapter',
   standalone: true,
-  imports: [CommonModule],
+  imports: [CommonModule, RouterLink],
   template: `
     <article class="max-w-4xl mx-auto px-6 py-12 animate-fade-in">
       <h1 class="text-4xl font-bold mb-4">Bun Adapter</h1>
@@ -16,14 +17,24 @@ import { CommonModule } from '@angular/common';
       <section class="mb-12">
         <h2 class="text-2xl font-bold mb-4">Overview</h2>
         <p class="text-text-secondary mb-4">
-          The <code>BunAdapter</code> extends NestJS's <code>AbstractHttpAdapter</code> to provide
-          a high-performance HTTP layer using Bun's native server. It's designed to be a drop-in
-          replacement for Express or Fastify adapters.
+          The <code>BunAdapter</code> extends NestJS's <code>AbstractHttpAdapter</code> and serves
+          every request from <code>Bun.serve()</code>. It owns routing, the request/response
+          lifecycle and middleware execution itself — there is no Express or Fastify instance
+          underneath.
         </p>
+        <div class="p-4 mb-4 bg-bun-orange/10 border border-bun-orange/20 rounded-lg">
+          <p class="text-text-primary text-sm">
+            <strong>🥟 Bun only.</strong>
+            The adapter calls <code>Bun.serve()</code> and <code>Bun.file()</code> directly and has
+            no Node.js fallback. Start your app with <code>bun run</code>.
+          </p>
+        </div>
         <div class="p-4 bg-nest-red/10 border border-nest-red/20 rounded-lg">
           <p class="text-text-primary text-sm">
-            <strong>Note:</strong> The adapter automatically handles request/response lifecycle,
-            routing, and middleware execution.
+            <strong>Note:</strong> Because the adapter reimplements the HTTP layer rather than
+            wrapping Express, compatibility with Express and Fastify middleware is limited to the
+            surface documented on the compatibility pages. Anything reaching for Node stream or
+            <code>EventEmitter</code> APIs on <code>req</code>/<code>res</code> will not work.
           </p>
         </div>
       </section>
@@ -37,13 +48,23 @@ import { CommonModule } from '@angular/common';
 
         <h3 class="text-lg font-semibold mb-3">create()</h3>
         <div class="bg-bg-code rounded-lg border border-border overflow-hidden mb-4">
-          <pre class="p-4 overflow-x-auto"><code class="text-sm"><span class="token-keyword">import</span> &#123; NestBunFactory &#125; <span class="token-keyword">from</span> <span class="token-string">'@pegasusheavy/nestjs-platform-bun'</span>;
+          <pre class="p-4 overflow-x-auto"><code class="text-sm"><span class="token-keyword">import</span> &#123; NestBunFactory &#125; <span class="token-keyword">from</span> <span class="token-string">'@lexmata/nestjs-platform-bun'</span>;
 
 <span class="token-keyword">const</span> app = <span class="token-keyword">await</span> NestBunFactory.<span class="token-function">create</span>(AppModule, &#123;
   logger: [<span class="token-string">'error'</span>, <span class="token-string">'warn'</span>],  <span class="token-comment">// Logging levels</span>
   cors: <span class="token-keyword">true</span>,                    <span class="token-comment">// Enable CORS</span>
-  bodyParser: <span class="token-keyword">true</span>,              <span class="token-comment">// Enable body parsing</span>
 &#125;);</code></pre>
+        </div>
+
+        <div class="p-4 mb-4 bg-nest-red/10 border border-nest-red/20 rounded-lg">
+          <p class="text-text-primary text-sm">
+            <strong>Body parsing is not configurable.</strong>
+            The adapter always parses request bodies natively from Bun's <code>Request</code>,
+            and <code>NestBunFactory</code> always passes <code>bodyParser: false</code> down to
+            <code>NestFactory</code> so NestJS does not stack its own parser on top. The
+            <code>bodyParser</code> option therefore has no effect. Set <code>rawBody: true</code>
+            if you also need the untouched bytes on <code>req.rawBody</code>.
+          </p>
         </div>
 
         <h3 class="text-lg font-semibold mb-3">Options</h3>
@@ -71,20 +92,36 @@ import { CommonModule } from '@angular/common';
                 <td class="px-4 py-3 text-text-secondary">CORS configuration</td>
               </tr>
               <tr class="border-b border-border">
-                <td class="px-4 py-3 font-mono text-nest-red">bodyParser</td>
+                <td class="px-4 py-3 font-mono text-nest-red">abortOnError</td>
                 <td class="px-4 py-3 text-text-secondary">boolean</td>
                 <td class="px-4 py-3 text-text-muted">true</td>
-                <td class="px-4 py-3 text-text-secondary">Enable body parsing</td>
+                <td class="px-4 py-3 text-text-secondary">Throw instead of exiting when bootstrap fails</td>
               </tr>
-              <tr>
+              <tr class="border-b border-border">
                 <td class="px-4 py-3 font-mono text-nest-red">httpsOptions</td>
                 <td class="px-4 py-3 text-text-secondary">TlsOptions</td>
                 <td class="px-4 py-3 text-text-muted">undefined</td>
-                <td class="px-4 py-3 text-text-secondary">HTTPS configuration</td>
+                <td class="px-4 py-3 text-text-secondary">TLS key/cert, mapped onto Bun's tls option</td>
+              </tr>
+              <tr>
+                <td class="px-4 py-3 font-mono text-nest-red">serverOptions</td>
+                <td class="px-4 py-3 text-text-secondary">BunServerOptions</td>
+                <td class="px-4 py-3 text-text-muted">undefined</td>
+                <td class="px-4 py-3 text-text-secondary">
+                  Bun-specific settings forwarded to <code>Bun.serve()</code> — TLS, unix socket,
+                  body size limits, development mode
+                </td>
               </tr>
             </tbody>
           </table>
         </div>
+
+        <p class="text-text-secondary text-sm mt-4">
+          See the
+          <a routerLink="/api/config" class="text-nest-red hover:underline">Configuration</a>
+          page for every <code>BunServerOptions</code> field and worked TLS and unix-socket
+          examples.
+        </p>
       </section>
 
       <!-- Application Methods -->
@@ -189,11 +226,48 @@ app.<span class="token-function">use</span>(<span class="token-string">'/api'</s
   &#125;
 
   &#64;<span class="token-function">Get</span>(<span class="token-string">'download'</span>)
-  &#64;<span class="token-function">Header</span>(<span class="token-string">'Content-Type'</span>, <span class="token-string">'application/pdf'</span>)
-  <span class="token-function">downloadFile</span>(&#64;<span class="token-function">Res</span>() res: Response) &#123;
-    res.<span class="token-function">sendFile</span>(<span class="token-string">'/path/to/file.pdf'</span>);
+  <span class="token-function">downloadFile</span>(&#64;<span class="token-function">Res</span>() res: ExpressResponse) &#123;
+    <span class="token-comment">// Sets Content-Disposition and infers Content-Type from the extension</span>
+    res.<span class="token-function">attachment</span>(<span class="token-string">'report.pdf'</span>);
+
+    <span class="token-comment">// Bun.file() returns a Blob, which send() streams as-is</span>
+    res.<span class="token-function">send</span>(Bun.<span class="token-function">file</span>(<span class="token-string">'/path/to/report.pdf'</span>));
   &#125;
 &#125;</code></pre>
+        </div>
+
+        <div class="p-4 mt-4 bg-yellow-500/10 border border-yellow-500/20 rounded-lg">
+          <p class="text-text-primary text-sm">
+            <strong>⚠ There is no <code>res.sendFile()</code>.</strong>
+            The response shim implements the subset listed on the
+            <a routerLink="/express-compat" class="text-nest-red hover:underline">Express Compatibility</a>
+            page; path-resolving file helpers are not part of it. Open the file yourself with
+            <code>Bun.file()</code> as above — <code>res.send()</code> accepts
+            <code>Blob</code>, <code>ArrayBuffer</code>, typed arrays and
+            <code>ReadableStream</code> directly. Note that nothing here validates the path, so
+            never interpolate user input into it.
+          </p>
+        </div>
+      </section>
+
+      <!-- Not supported -->
+      <section class="mb-12">
+        <h2 class="text-2xl font-bold mb-4">Not Supported</h2>
+        <p class="text-text-secondary mb-4">
+          These parts of the NestJS HTTP surface are not implemented by this adapter:
+        </p>
+        <div class="space-y-3">
+          @for (item of unsupported; track item.name) {
+            <div class="p-4 bg-bg-secondary rounded-lg border border-border">
+              <div class="flex items-start gap-3">
+                <span class="text-yellow-400 mt-0.5">⚠</span>
+                <div>
+                  <code class="text-nest-red font-mono text-sm">{{ item.name }}</code>
+                  <p class="text-text-secondary text-sm mt-1">{{ item.reason }}</p>
+                </div>
+              </div>
+            </div>
+          }
         </div>
       </section>
 
@@ -234,4 +308,27 @@ app.<span class="token-function">use</span>(<span class="token-string">'/api'</s
     </article>
   `,
 })
-export class AdapterComponent {}
+export class AdapterComponent {
+  unsupported = [
+    {
+      name: 'View engines / @Render()',
+      reason:
+        'setViewEngine() and render() throw. Server-side templating is not available — return data and render on the client, or put a templating service in front. This also rules out anything that depends on server-rendered views, and it means a @Render() route or a setViewEngine() call fails loudly at bootstrap rather than silently serving nothing.',
+    },
+    {
+      name: 'res.sendFile()',
+      reason:
+        'Not part of the response shim. Use res.attachment(name) plus res.send(Bun.file(path)) — send() accepts Blob, ArrayBuffer, typed arrays and ReadableStream directly.',
+    },
+    {
+      name: 'bodyParser',
+      reason:
+        'Inert. Bodies are always parsed natively and parsing cannot be disabled. (rawBody, by contrast, does work — it populates req.rawBody with a Buffer.)',
+    },
+    {
+      name: 'Node stream and EventEmitter APIs on req/res',
+      reason:
+        'The shims expose no write(), on(), once(), emit(), writeHead() or flush(). Middleware that patches the response stream — compression is the common example — cannot work.',
+    },
+  ];
+}

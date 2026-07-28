@@ -49,7 +49,7 @@ import { CommonModule } from '@angular/common';
 pnpm remove &#64;nestjs/platform-express
 
 <span class="text-text-muted"># Install Bun adapter</span>
-pnpm add @pegasusheavy/nestjs-platform-bun</code></pre>
+pnpm add @lexmata/nestjs-platform-bun</code></pre>
             </div>
           </div>
 
@@ -73,7 +73,7 @@ pnpm add @pegasusheavy/nestjs-platform-bun</code></pre>
               <div>
                 <div class="text-sm text-text-muted mb-2">After (Bun)</div>
                 <div class="bg-bg-code rounded-lg border border-green-500/20 p-4 overflow-x-auto">
-                  <pre><code class="text-sm"><span class="token-keyword">import</span> &#123; NestBunFactory &#125; <span class="token-keyword">from</span> <span class="token-string">'@pegasusheavy/nestjs-platform-bun'</span>;
+                  <pre><code class="text-sm"><span class="token-keyword">import</span> &#123; NestBunFactory &#125; <span class="token-keyword">from</span> <span class="token-string">'@lexmata/nestjs-platform-bun'</span>;
 
 <span class="token-keyword">const</span> app = <span class="token-keyword">await</span> NestBunFactory
   .<span class="token-function">create</span>(AppModule);
@@ -96,6 +96,14 @@ node dist/main.js
 <span class="text-text-muted"># Use</span>
 bun run src/main.ts</code></pre>
             </div>
+            <div class="p-4 mt-4 bg-bun-orange/10 border border-bun-orange/20 rounded-lg">
+              <p class="text-text-primary text-sm">
+                <strong>🥟 This step is mandatory.</strong>
+                Bun is not an optional optimisation here — the adapter calls
+                <code>Bun.serve()</code> directly and cannot run under Node.js. Update your
+                Dockerfile, process manager and CI to invoke <code>bun</code>.
+              </p>
+            </div>
           </div>
         </div>
       </section>
@@ -112,7 +120,7 @@ bun run src/main.ts</code></pre>
 pnpm remove &#64;nestjs/platform-fastify
 
 <span class="text-text-muted"># Install Bun adapter</span>
-pnpm add @pegasusheavy/nestjs-platform-bun</code></pre>
+pnpm add @lexmata/nestjs-platform-bun</code></pre>
             </div>
           </div>
 
@@ -136,7 +144,7 @@ pnpm add @pegasusheavy/nestjs-platform-bun</code></pre>
                 <div class="text-sm text-text-muted mb-2">After (Bun)</div>
                 <div class="bg-bg-code rounded-lg border border-green-500/20 p-4 overflow-x-auto">
                   <pre><code class="text-sm"><span class="token-keyword">import</span> &#123; NestBunFactory &#125; <span class="token-keyword">from</span>
-  <span class="token-string">'@pegasusheavy/nestjs-platform-bun'</span>;
+  <span class="token-string">'@lexmata/nestjs-platform-bun'</span>;
 
 
 <span class="token-keyword">const</span> app = <span class="token-keyword">await</span> NestBunFactory
@@ -152,6 +160,10 @@ pnpm add @pegasusheavy/nestjs-platform-bun</code></pre>
       <!-- Compatibility Checklist -->
       <section class="p-6 bg-bg-secondary rounded-xl border border-border">
         <h2 class="text-xl font-bold mb-4">Compatibility Checklist</h2>
+        <p class="text-text-secondary text-sm mb-4">
+          ✓ means covered by this repository's test suite. ⚠ means untested or unsupported —
+          verify it against your own application before committing to the migration.
+        </p>
         <div class="space-y-3">
           @for (item of checklist; track item.text) {
             <div class="flex items-start gap-3">
@@ -168,12 +180,15 @@ pnpm add @pegasusheavy/nestjs-platform-bun</code></pre>
 })
 export class MigrationComponent {
   checklist = [
-    { text: 'Controllers and decorators work unchanged', supported: true },
-    { text: 'Guards, interceptors, and pipes work unchanged', supported: true },
-    { text: 'Express middleware compatibility layer', supported: true },
-    { text: 'Fastify hooks compatibility layer', supported: true },
-    { text: 'WebSocket gateway may need adjustment', supported: false },
-    { text: 'Swagger/OpenAPI works with minor config', supported: true },
-    { text: 'GraphQL works unchanged', supported: true },
+    { text: 'Controllers, modules and routing decorators work unchanged', supported: true },
+    { text: 'Express middleware compatibility layer (documented subset)', supported: true },
+    { text: 'Fastify hooks and decorators compatibility layer (documented subset)', supported: true },
+    { text: 'Guards, interceptors and pipes — expected to work (they sit above the HTTP layer) but untested against this adapter', supported: false },
+    { text: 'Swagger / OpenAPI — untested. @nestjs/swagger serves its UI through the adapter, so verify before relying on it', supported: false },
+    { text: 'GraphQL — untested. Neither Apollo nor Mercurius integration is exercised anywhere in this repo', supported: false },
+    { text: 'WebSocket gateways — untested and likely to need adjustment', supported: false },
+    { text: 'View engines and @Render() are NOT supported — setViewEngine() and render() throw', supported: false },
+    { text: 'compression and other middleware that treats res as a Node stream will not work', supported: false },
+    { text: 'Signed cookies are not supported', supported: false },
   ];
 }

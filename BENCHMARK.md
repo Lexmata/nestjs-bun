@@ -1,30 +1,12 @@
 # Benchmark Results
 
-This document provides performance benchmarks comparing the `@pegasusheavy/nestjs-platform-bun` adapter against Express and Fastify adapters for NestJS.
+This document describes the benchmark suite that compares the `@lexmata/nestjs-platform-bun` adapter against the Express and Fastify adapters for NestJS, and records the numbers measured on one machine.
 
-## Why Bun is Faster
+> **Read the numbers, not the marketing.** An earlier revision of this file carried a "Sample Benchmark Output" table that had never been produced by the harness (its column layout, number formatting and arithmetic were all inconsistent with the code), alongside a claim that the adapter is "designed to **always be faster**". Both have been removed. What follows is what the harness actually printed.
 
-The `@pegasusheavy/nestjs-platform-bun` adapter leverages Bun's native HTTP server which is built from the ground up in Zig and optimized for performance. Key advantages include:
+## What the benchmark measures
 
-1. **Native HTTP Server**: Uses `Bun.serve()` which is significantly faster than Node.js's `http` module
-2. **Zero-Copy Parsing**: Bun's request parsing avoids unnecessary memory copies
-3. **Optimized Event Loop**: Bun's event loop is designed for maximum throughput
-4. **JIT Compilation**: Bun uses JavaScriptCore which has excellent JIT performance
-5. **Minimal Overhead**: Direct routing without framework middleware layers
-
-## Benchmark Configuration
-
-```
-- Warmup duration: 3 seconds
-- Benchmark duration: 10 seconds
-- Connections: 100 concurrent
-- Pipelining: 10 requests per connection
-- Tool: autocannon
-```
-
-## Test Environment
-
-The benchmarks are run on identical test scenarios across all three adapters:
+Three NestJS applications built from the **same** module (`benchmark/apps/shared.module.ts`), each served by a different HTTP adapter, benchmarked with [autocannon](https://github.com/mcollina/autocannon).
 
 | Endpoint | Description |
 |----------|-------------|
@@ -35,115 +17,149 @@ The benchmarks are run on identical test scenarios across all three adapters:
 | `GET /cpu/light` | CPU-bound work (fibonacci(20)) |
 | `POST /items` | POST with JSON body parsing |
 
-## Running Benchmarks
+The Bun app imports the package **by name** (`@lexmata/nestjs-platform-bun`, linked with `file:..`), so the suite measures the built artifact that users install rather than untranspiled TypeScript out of `src/`.
 
-To run the benchmarks yourself:
+### Correctness gating
+
+Before any measurement, the harness issues one request per endpoint per adapter and asserts the status **and** the response body — `/cpu/light` must actually return `6765`, `POST /items` must echo the posted body back, and so on. Any mismatch aborts that adapter with a non-zero exit.
+
+This is not ceremony. A 404 is far cheaper to serve than `fibonacci(20)`, so without the assertion a broken route scores as the *fastest* adapter. The gate caught exactly that on first run: `tsx` (which uses esbuild) does not implement `emitDecoratorMetadata`, so constructor-injected dependencies resolved to `undefined` and every service-backed route in the Express and Fastify apps returned **HTTP 500**. Bun's transpiler does emit the metadata, so the previous harness had been comparing a working Bun app against two permanently broken baselines — and counting those 500s as successful responses. The fixture now uses explicit `@Inject()` so all three adapters behave identically.
+
+Each run also fails if autocannon reports any non-2xx response during measurement.
+
+## Configuration
+
+Defaults, all overridable by environment variable:
+
+```
+Warmup:       3s per endpoint, using the same method/body/headers as the measurement
+Measurement:  3 runs x 5s per endpoint; the median run is reported
+Connections:  100 concurrent
+Pipelining:   10 requests per connection
+Workers:      autocannon worker threads (half the CPUs, clamped to 2..4)
+Tool:         autocannon 8
+```
+
+| Variable | Default | Meaning |
+|---|---|---|
+| `BENCH_RUNS` | `3` | measurement runs per endpoint |
+| `BENCH_DURATION` | `5` | seconds per measurement run |
+| `BENCH_WARMUP` | `3` | seconds of warmup per endpoint |
+| `BENCH_CONNECTIONS` | `100` | concurrent connections |
+| `BENCH_PIPELINING` | `10` | pipelined requests per connection |
+| `BENCH_WORKERS` | CPUs/2, 2..4 | autocannon worker threads |
+| `BENCH_BOOT_TIMEOUT_MS` | `60000` | how long to wait for a server to answer `/health` |
+
+## Running the benchmarks
 
 ```bash
-# Install dependencies
-cd benchmark
-pnpm install
-
-# Run full benchmark suite
+# From the repository root (builds the package first, then runs the suite)
 pnpm bench
 
-# Or run individual servers for manual testing
+# Or directly
+cd benchmark
+pnpm install
+pnpm bench
+
+# Individual servers, for manual poking
 pnpm start:express   # Port 4001
 pnpm start:fastify   # Port 4002
 pnpm start:bun       # Port 4003
 ```
 
-## Expected Results
+## Measured results
 
-Based on Bun's performance characteristics, the `@pegasusheavy/nestjs-platform-bun` adapter typically achieves:
+**Do not treat the table below as a specification.** It is one run, on one machine, under the conditions recorded here. Re-run it on your own hardware before relying on any of it.
 
-### vs Express
+| | |
+|---|---|
+| Date | 2026-07-27 |
+| Machine | 13th Gen Intel Core i9-13900K, 32 logical CPUs, 62 GB RAM |
+| OS | Arch Linux, kernel 7.1.4 |
+| Bun | 1.3.14 |
+| Node (Express/Fastify apps and load generator) | v26.5.0 |
+| NestJS | 11.1.11 |
+| Method | median of 3 x 5s runs, 100 connections, pipelining 10, 4 autocannon workers |
 
-| Metric | Improvement |
-|--------|-------------|
-| Requests/sec | **3-5x faster** |
-| Latency (avg) | **3-5x lower** |
-| Latency (P99) | **3-4x lower** |
-| Throughput | **3-5x higher** |
+Requests/sec (higher is better), median run:
 
-### vs Fastify
+| Endpoint | Express | Fastify | Bun | Bun vs Express | Bun vs Fastify |
+|---|---:|---:|---:|---:|---:|
+| `GET /` | 22,104 | **33,670** | 18,115 | −18.0% | −46.2% |
+| `GET /json` | 22,523 | **30,850** | 19,070 | −15.3% | −38.2% |
+| `GET /users/:id` | 19,113 | **24,594** | 17,914 | −6.3% | −27.2% |
+| `GET /health` | 21,080 | **72,822** | 17,434 | −17.3% | −76.1% |
+| `GET /cpu/light` | 5,841 | **17,411** | 11,204 | +91.8% | −35.7% |
+| `POST /items` | 8,173 | **50,363** | 32,630 | +299.2% | −35.2% |
+| **Aggregate requests** | 494,176 | **1,148,517** | 581,818 | **+17.7%** | **−49.3%** |
 
-| Metric | Improvement |
-|--------|-------------|
-| Requests/sec | **1.5-2x faster** |
-| Latency (avg) | **1.5-2x lower** |
-| Latency (P99) | **1.3-1.8x lower** |
-| Throughput | **1.5-2x higher** |
+### What this run says
 
-## Sample Benchmark Output
+- **Fastify was fastest on every endpoint.** The Bun adapter did not beat it anywhere, and trailed it by 27–76%.
+- **Against Express the picture is mixed**: Bun lost on the four cheap endpoints and won substantially on the two expensive ones (`/cpu/light` +92%, `POST /items` +299%), where Express's per-request overhead dominates. Aggregate came out +17.7%.
+- Throughput in MB/s was consistently lowest for Bun, which is at least partly a response-size difference rather than a speed difference — the adapters do not serialise identical bytes.
 
-```
-📊 Hello World (text)
-----------------------------------------------------------------------------------------------------
-| Adapter  | Req/sec    | Avg Latency | P99 Latency | Throughput  | vs Express | vs Fastify |
-----------------------------------------------------------------------------------------------------
-| Bun      |   120,000+ |      8.5 ms |    15.00 ms |    30.0 MB  |    +250.0% |     +50.0% |
-| Fastify  |    80,000+ |     12.5 ms |    25.00 ms |    20.0 MB  |    +150.0% |       0.0% |
-| Express  |    32,000+ |     30.0 ms |    60.00 ms |     8.0 MB  |       0.0% |     -60.0% |
+### Caveats that materially affect these numbers
 
-📊 JSON Response
-----------------------------------------------------------------------------------------------------
-| Adapter  | Req/sec    | Avg Latency | P99 Latency | Throughput  | vs Express | vs Fastify |
-----------------------------------------------------------------------------------------------------
-| Bun      |   100,000+ |     10.0 ms |    18.00 ms |    28.0 MB  |    +200.0% |     +40.0% |
-| Fastify  |    70,000+ |     14.0 ms |    28.00 ms |    20.0 MB  |    +130.0% |       0.0% |
-| Express  |    30,000+ |     32.0 ms |    65.00 ms |     8.5 MB  |       0.0% |     -57.0% |
+1. **The host was not idle.** Several other processes were competing for CPU during this run. Run-to-run spread reached 58% on `/health` (Fastify) and 66% on `POST /items` (Express); anything under roughly 20% relative difference is inside the noise here.
+2. **The load generator shares the host with the server under test.** autocannon runs with worker threads to reduce the chance of being the bottleneck, but on a single box it still competes for the same cores.
+3. **Three runs is enough to see a median, not enough for a confidence interval.** No statistical test is applied.
+4. **One machine, one OS, one Bun version.** Bun's relative position varies significantly with kernel, hardware and version.
 
-📊 Path Parameter
-----------------------------------------------------------------------------------------------------
-| Adapter  | Req/sec    | Avg Latency | P99 Latency | Throughput  | vs Express | vs Fastify |
-----------------------------------------------------------------------------------------------------
-| Bun      |   150,000+ |      6.5 ms |    12.00 ms |    35.0 MB  |    +350.0% |     +80.0% |
-| Fastify  |    85,000+ |     11.5 ms |    22.00 ms |    19.5 MB  |    +160.0% |       0.0% |
-| Express  |    33,000+ |     30.0 ms |    55.00 ms |     7.5 MB  |       0.0% |     -61.0% |
-```
+Given (1) and (3), the honest summary is: *on this hardware, under this load, the Bun adapter did not outperform Fastify on any benchmarked endpoint, and beat Express only on the two CPU/body-heavy ones.* Reproducing this on a quiet, dedicated machine before drawing conclusions is strongly recommended.
 
-## Performance Guarantees
+## CI verification
 
-The `@pegasusheavy/nestjs-platform-bun` adapter is designed to **always be faster** than Express and Fastify adapters due to:
-
-1. **Bun's Native Performance**: Bun's HTTP server outperforms Node.js in all scenarios
-2. **Minimal Abstraction**: Direct mapping to Bun's APIs without unnecessary layers
-3. **Optimized Compatibility Layers**: Express/Fastify compatibility is implemented efficiently
-4. **No Node.js Overhead**: Runs entirely on Bun's optimized runtime
-
-## CI/CD Verification
-
-This project includes automated benchmark verification in CI to ensure the Bun adapter maintains its performance advantage:
+CI runs a **reduced** variant of the suite, not the full one: `benchmark/verify-benchmarks.ts`, invoked as `pnpm verify` from the `benchmark` job in [`.github/workflows/ci.yml`](.github/workflows/ci.yml).
 
 ```yaml
-# .github/workflows/benchmark.yml (example)
-- name: Run Benchmarks
-  run: |
-    cd benchmark
-    pnpm install
-    pnpm bench
+- name: Install benchmark dependencies
+  run: cd benchmark && pnpm install
 
-- name: Verify Performance
-  run: |
-    # Verify Bun is faster than both Express and Fastify
-    node scripts/verify-benchmarks.js
+- name: Typecheck benchmark harness
+  run: cd benchmark && pnpm typecheck
+
+- name: Verify Bun adapter performance
+  run: cd benchmark && pnpm verify
+  timeout-minutes: 15
 ```
+
+Differences from `pnpm bench`:
+
+- 5s per endpoint, 50 connections, pipelining 5, 2 workers, **one** measurement run (no median, no spread).
+- All six endpoints are covered, and all three adapters must boot and pass the same response assertions.
+- It fails if any adapter fails to start, if any response is wrong, if any non-2xx is recorded, or if fewer than 18 (3 adapters × 6 endpoints) measurements complete.
+
+The required speed ratios are configurable so the gate can be tightened as the adapter improves:
+
+| Variable | Default | Meaning |
+|---|---|---|
+| `VERIFY_MIN_RATIO_EXPRESS` | `1.0` | minimum Bun ÷ Express req/s per endpoint |
+| `VERIFY_MIN_RATIO_FASTIFY` | `1.0` | minimum Bun ÷ Fastify req/s per endpoint |
+
+> **Known state:** at the defaults above this gate **fails** on the endpoints where the adapter currently trails, which the measured results show is most of them. That is intentional — the gate reports the real state rather than passing vacuously. Prior to this rewrite it could not fail at all: if a baseline server failed to boot, the script skipped it, the comparison guards saw no baseline to compare against, and it printed "Performance verification PASSED!" and exited 0.
+
+## Why Bun *could* be faster
+
+Design-level reasons the adapter has headroom, none of which are a substitute for a measurement:
+
+1. **Native HTTP server**: `Bun.serve()` is implemented in Zig rather than layered on Node's `http` module.
+2. **Fewer copies**: Bun's request parsing avoids some intermediate buffers.
+3. **JavaScriptCore**: a different JIT with a different performance profile from V8.
+4. **Less middleware indirection**: routing maps more directly onto the runtime's primitives.
+
+Whether those translate into wins for *this* adapter on *your* workload is an empirical question. Right now, on the hardware above, they largely do not.
 
 ## Notes
 
-- Results may vary based on hardware, OS, and Bun version
-- Production performance depends on application complexity
-- Memory usage is also lower with Bun due to more efficient memory management
-- For CPU-bound tasks, performance gains are consistent across all runtimes
-- For I/O-bound tasks, Bun's async handling provides significant advantages
+- Results vary with hardware, OS, kernel, Bun version and NestJS version.
+- Production performance is dominated by application code, not adapter overhead, for all but the thinnest handlers.
+- For CPU-bound handlers the adapter's relative position improves, because per-request overhead is a smaller share of the total.
 
 ## Contributing
 
-If you find scenarios where the Bun adapter underperforms, please open an issue with:
+Performance reports are welcome, in either direction. If you find a scenario where the Bun adapter is unexpectedly slow — or unexpectedly fast — please open an issue with:
 
-1. Benchmark reproduction steps
-2. Your environment details (OS, Bun version, hardware)
-3. The specific test case showing slower performance
-
-We're committed to maintaining performance leadership in all scenarios.
+1. Reproduction steps (ideally a `pnpm bench` invocation with the environment variables you used)
+2. Environment details (OS, kernel, Bun version, NestJS version, hardware, whether the host was idle)
+3. The full harness output, including the spread column

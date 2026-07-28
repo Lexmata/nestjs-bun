@@ -6,20 +6,22 @@
   "scripts": {
     "bench": "tsx run-benchmarks.ts",
     "verify": "tsx verify-benchmarks.ts",
+    "typecheck": "tsc --noEmit",
     "start:express": "tsx apps/express-app.ts",
     "start:fastify": "tsx apps/fastify-app.ts",
     "start:bun": "bun apps/bun-app.ts"
   },
   "dependencies": {
+    "@lexmata/nestjs-platform-bun": "file:..",
     "@nestjs/common": "^11.0.0",
     "@nestjs/core": "^11.0.0",
     "@nestjs/platform-express": "^11.0.0",
     "@nestjs/platform-fastify": "^11.0.0",
-    "@pegasusheavy/nestjs-platform-bun": "file:..",
     "reflect-metadata": "^0.2.2",
     "rxjs": "^7.8.1"
   },
   "devDependencies": {
+    "@types/autocannon": "^7.12.7",
     "@types/node": "^22.0.0",
     "autocannon": "^8.0.0",
     "tsx": "^4.19.0",

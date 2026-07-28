@@ -1,6 +1,7 @@
 import { Component } from '@angular/core';
 import { RouterLink } from '@angular/router';
 import { CommonModule } from '@angular/common';
+import { COPYRIGHT, PACKAGE_NAME, REPO_URL, VERSION_LABEL } from '../site';
 
 @Component({
   selector: 'app-home',
@@ -23,7 +24,7 @@ import { CommonModule } from '@angular/common';
                 <span class="animate-ping absolute inline-flex h-full w-full rounded-full bg-nest-red opacity-75"></span>
                 <span class="relative inline-flex rounded-full h-2 w-2 bg-nest-red"></span>
               </span>
-              v0.1.0 Now Available
+              {{ versionLabel }} Now Available
             </div>
 
             <!-- Title -->
@@ -36,10 +37,22 @@ import { CommonModule } from '@angular/common';
 
             <!-- Description -->
             <p class="text-xl text-text-secondary mb-8 leading-relaxed">
-              A high-performance HTTP adapter for NestJS that runs on Bun's native server.
-              Get up to <span class="text-nest-red font-semibold">5x faster</span> than Express
-              and <span class="text-nest-red font-semibold">2x faster</span> than Fastify.
+              An HTTP adapter that runs NestJS directly on
+              <span class="text-nest-red font-semibold">Bun's native server</span>.
+              No Express, no Fastify, no Node <code class="text-base">http</code> module in the
+              request path.
             </p>
+
+            <!-- Runtime requirement -->
+            <div class="inline-flex items-start gap-2 mb-8 px-4 py-3 rounded-lg
+                        bg-bun-orange/10 border border-bun-orange/20 text-sm">
+              <span class="text-lg leading-none">🥟</span>
+              <span class="text-text-secondary">
+                <strong class="text-text-primary">Bun only.</strong>
+                This adapter targets the Bun runtime exclusively — Node.js compatibility is
+                a non-goal.
+              </span>
+            </div>
 
             <!-- CTA Buttons -->
             <div class="flex flex-wrap gap-4">
@@ -54,8 +67,9 @@ import { CommonModule } from '@angular/common';
                 </svg>
               </a>
               <a
-                href="https://github.com/PegasusHeavyIndustries/nestjs-bun"
+                [href]="repoUrl"
                 target="_blank"
+                rel="noopener"
                 class="inline-flex items-center gap-2 px-6 py-3 bg-bg-tertiary text-text-primary font-semibold
                        rounded-lg hover:bg-bg-card transition-colors border border-border"
               >
@@ -71,7 +85,7 @@ import { CommonModule } from '@angular/common';
               <code class="text-sm">
                 <span class="text-text-muted">$</span>
                 <span class="text-text-secondary"> pnpm add</span>
-                <span class="text-nest-red-light"> @pegasusheavy/nestjs-platform-bun</span>
+                <span class="text-nest-red-light"> {{ packageName }}</span>
               </code>
             </div>
           </div>
@@ -80,7 +94,7 @@ import { CommonModule } from '@angular/common';
 
       <!-- Features Section -->
       <section class="max-w-6xl mx-auto px-6 py-20">
-        <h2 class="text-3xl font-bold text-center mb-4">Why Choose @pegasusheavy/nestjs-platform-bun?</h2>
+        <h2 class="text-3xl font-bold text-center mb-4">Why Choose @lexmata/nestjs-platform-bun?</h2>
         <p class="text-text-secondary text-center mb-12 max-w-2xl mx-auto">
           Built from the ground up for performance, with full compatibility for your existing middleware.
         </p>
@@ -105,17 +119,22 @@ import { CommonModule } from '@angular/common';
         <div class="bg-bg-secondary rounded-2xl border border-border p-8 md:p-12">
           <div class="grid lg:grid-cols-2 gap-12 items-center">
             <div>
-              <h2 class="text-3xl font-bold mb-4">Unmatched Performance</h2>
+              <h2 class="text-3xl font-bold mb-4">Built for Throughput</h2>
               <p class="text-text-secondary mb-6 leading-relaxed">
-                Bun's native HTTP server delivers exceptional throughput with minimal latency.
-                Our adapter brings this performance to your NestJS applications without sacrificing
-                the framework features you love.
+                Every request is handled by <code>Bun.serve()</code> and dispatched straight into
+                the NestJS pipeline. There is no Express app, no Fastify instance and no Node
+                <code>http</code> server sitting in front of your controllers.
+              </p>
+              <p class="text-text-secondary mb-6 leading-relaxed text-sm">
+                We do not publish performance figures — they depend too much on your hardware
+                and workload to be meaningful. A reproducible benchmark suite ships in the
+                repository so you can measure on the machines you deploy to.
               </p>
               <a
                 routerLink="/benchmarks"
                 class="inline-flex items-center gap-2 text-nest-red hover:text-nest-red-light transition-colors"
               >
-                View full benchmarks
+                Run the benchmark suite
                 <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                   <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 7l5 5m0 0l-5 5m5-5H6"/>
                 </svg>
@@ -123,18 +142,10 @@ import { CommonModule } from '@angular/common';
             </div>
 
             <div class="space-y-4">
-              @for (stat of performanceStats; track stat.label) {
+              @for (point of architecturePoints; track point.label) {
                 <div class="bg-bg-tertiary rounded-lg p-4">
-                  <div class="flex justify-between items-center mb-2">
-                    <span class="text-text-secondary text-sm">{{ stat.label }}</span>
-                    <span class="text-nest-red font-bold">{{ stat.value }}</span>
-                  </div>
-                  <div class="h-2 bg-bg-primary rounded-full overflow-hidden">
-                    <div
-                      class="h-full bg-gradient-to-r from-nest-red to-nest-red-light rounded-full transition-all duration-1000"
-                      [style.width]="stat.percentage + '%'"
-                    ></div>
-                  </div>
+                  <div class="font-semibold text-text-primary text-sm mb-1">{{ point.label }}</div>
+                  <p class="text-text-secondary text-sm leading-relaxed">{{ point.description }}</p>
                 </div>
               }
             </div>
@@ -159,7 +170,7 @@ import { CommonModule } from '@angular/common';
               </div>
               <span class="text-text-muted text-sm ml-2">main.ts</span>
             </div>
-            <pre class="p-6 overflow-x-auto text-sm"><code><span class="token-keyword">import</span> &#123; NestBunFactory &#125; <span class="token-keyword">from</span> <span class="token-string">'@pegasusheavy/nestjs-platform-bun'</span>;
+            <pre class="p-6 overflow-x-auto text-sm"><code><span class="token-keyword">import</span> &#123; NestBunFactory &#125; <span class="token-keyword">from</span> <span class="token-string">'@lexmata/nestjs-platform-bun'</span>;
 <span class="token-keyword">import</span> &#123; AppModule &#125; <span class="token-keyword">from</span> <span class="token-string">'./app.module'</span>;
 
 <span class="token-keyword">async function</span> <span class="token-function">bootstrap</span>() &#123;
@@ -189,10 +200,10 @@ import { CommonModule } from '@angular/common';
                   <path d="M12 2L2 7l10 5 10-5-10-5zM2 17l10 5 10-5M2 12l10 5 10-5"/>
                 </svg>
               </div>
-              <span class="font-semibold text-text-primary">@pegasusheavy/nestjs-platform-bun</span>
+              <span class="font-semibold text-text-primary">@lexmata/nestjs-platform-bun</span>
             </div>
             <p class="text-text-muted text-sm">
-              © 2026 Pegasus Heavy Industries LLC. MIT Licensed.
+              {{ copyright }}
             </p>
           </div>
         </div>
@@ -201,20 +212,25 @@ import { CommonModule } from '@angular/common';
   `
 })
 export class HomeComponent {
+  protected readonly repoUrl = REPO_URL;
+  protected readonly packageName = PACKAGE_NAME;
+  protected readonly copyright = COPYRIGHT;
+  protected readonly versionLabel = VERSION_LABEL;
+
   features = [
     {
-      title: 'Lightning Fast',
-      description: 'Up to 5x faster than Express and 2x faster than Fastify thanks to Bun\'s native HTTP server.',
+      title: 'Native Bun HTTP',
+      description: 'Requests are served by Bun.serve() directly — no Express, Fastify or Node http module in the request path.',
       icon: '<svg class="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 10V3L4 14h7v7l9-11h-7z"/></svg>'
     },
     {
-      title: 'Drop-in Replacement',
-      description: 'Replace your existing Express or Fastify adapter with minimal code changes.',
+      title: 'Familiar Bootstrap',
+      description: 'Swap NestFactory.create() for NestBunFactory.create(). Controllers, modules and decorators are unchanged.',
       icon: '<svg class="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 7h12m0 0l-4-4m4 4l-4 4m0 6H4m0 0l4 4m-4-4l4-4"/></svg>'
     },
     {
-      title: 'Full Middleware Support',
-      description: 'Compatible with Express and Fastify middleware through our compatibility layers.',
+      title: 'Middleware Compatibility Layers',
+      description: 'Express-style req/res and Fastify-style hooks and decorators, for middleware that sticks to the documented surface.',
       icon: '<svg class="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 3v2m6-2v2M9 19v2m6-2v2M5 9H3m2 6H3m18-6h-2m2 6h-2M7 19h10a2 2 0 002-2V7a2 2 0 00-2-2H7a2 2 0 00-2 2v10a2 2 0 002 2zM9 9h6v6H9V9z"/></svg>'
     },
     {
@@ -223,21 +239,33 @@ export class HomeComponent {
       icon: '<svg class="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M10 20l4-16m4 4l4 4-4 4M6 16l-4-4 4-4"/></svg>'
     },
     {
-      title: 'Production Ready',
-      description: 'Comprehensive test coverage and CI/CD verified performance benchmarks.',
+      title: 'Tested in CI',
+      description: 'Unit and e2e suites run on every pull request, alongside a benchmark job that fails if the Bun adapter regresses behind Express or Fastify.',
       icon: '<svg class="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12l2 2 4-4m5.618-4.016A11.955 11.955 0 0112 2.944a11.955 11.955 0 01-8.618 3.04A12.02 12.02 0 003 9c0 5.591 3.824 10.29 9 11.622 5.176-1.332 9-6.03 9-11.622 0-1.042-.133-2.052-.382-3.016z"/></svg>'
     },
     {
-      title: 'Active Development',
-      description: 'Regular updates, quick bug fixes, and responsive community support.',
+      title: 'Early Days',
+      description: `${VERSION_LABEL}. The core HTTP surface is in place; compatibility layers cover a documented subset. Check the compatibility pages before you port.`,
       icon: '<svg class="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z"/></svg>'
     }
   ];
 
-  performanceStats = [
-    { label: 'vs Express (Requests/sec)', value: '+400%', percentage: 100 },
-    { label: 'vs Fastify (Requests/sec)', value: '+80%', percentage: 80 },
-    { label: 'Latency Reduction', value: '-75%', percentage: 75 },
-    { label: 'Memory Efficiency', value: '+40%', percentage: 60 }
+  architecturePoints = [
+    {
+      label: 'No intermediate framework',
+      description: 'Routing and dispatch happen in the adapter itself, so a request never passes through an Express or Fastify router.',
+    },
+    {
+      label: 'Native request bodies',
+      description: "Bodies are read through Bun's Request APIs rather than a JavaScript stream-collecting middleware.",
+    },
+    {
+      label: 'Zig-implemented server',
+      description: 'Socket handling and HTTP parsing run in Bun.serve() outside the JavaScript heap.',
+    },
+    {
+      label: 'Measure it yourself',
+      description: 'The repository ships an autocannon suite comparing all three adapters on identical NestJS modules.',
+    },
   ];
 }

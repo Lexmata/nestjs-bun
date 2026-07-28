@@ -1,17 +1,29 @@
 {
-  "name": "@pegasusheavy/nestjs-platform-bun",
+  "name": "@lexmata/nestjs-platform-bun",
   "type": "module",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "NestJS HTTP adapter for Bun runtime",
-  "main": "dist/index.js",
-  "module": "dist/index.mjs",
+  "publishConfig": {
+    "access": "public"
+  },
+  "main": "dist/index.cjs",
+  "module": "dist/index.js",
   "types": "dist/index.d.ts",
   "exports": {
     ".": {
-      "types": "./dist/index.d.ts",
-      "import": "./dist/index.mjs",
-      "require": "./dist/index.js"
-    }
+      "import": {
+        "types": "./dist/index.d.ts",
+        "default": "./dist/index.js"
+      },
+      "require": {
+        "types": "./dist/index.d.cts",
+        "default": "./dist/index.cjs"
+      }
+    },
+    "./package.json": "./package.json"
+  },
+  "engines": {
+    "bun": ">=1.0.0"
   },
   "files": [
     "dist"
@@ -19,17 +31,24 @@
   "scripts": {
     "build": "tsup",
     "dev": "tsup --watch",
-    "test": "vitest",
-    "test:run": "vitest run",
-    "test:coverage": "vitest run --coverage",
-    "test:e2e": "vitest run --config vitest.e2e.config.ts",
-    "test:e2e:coverage": "vitest run --config vitest.e2e.config.ts --coverage",
-    "test:e2e:bun": "bun test test/e2e/",
-    "lint": "eslint src/",
-    "lint:fix": "eslint src/ --fix",
+    "test": "bun test",
+    "test:watch": "bun test --watch",
+    "test:coverage": "bun test --coverage",
+    "test:unit": "bun test src/",
+    "test:e2e": "bun test test/e2e/",
+    "typecheck": "tsc --noEmit",
+    "_comment:typecheck:test": "Separate from `typecheck` because the root tsconfig only includes src/. test/e2e currently has 48 type errors (see tsconfig.test.json); this gate tracks them without turning the main gate red. Fold it back into `typecheck` once test/ is clean.",
+    "typecheck:test": "tsc --noEmit -p tsconfig.test.json",
+    "typecheck:bench": "cd benchmark && pnpm typecheck",
+    "typecheck:examples": "pnpm build && cd examples && pnpm install && pnpm typecheck",
+    "lint": "eslint .",
+    "lint:fix": "eslint . --fix",
     "bench": "pnpm build && cd benchmark && pnpm install && pnpm bench",
+    "bench:verify": "pnpm build && cd benchmark && pnpm install && pnpm verify",
     "prepublishOnly": "pnpm build",
-    "prepare": "husky"
+    "prepare": "husky",
+    "_comment:deprecate:old": "Run ONCE by a maintainer, by hand, after `npm publish` of the first @lexmata release succeeds. Points anyone still installing the old @pegasusheavy name at the new one. Requires npm publish rights on the @pegasusheavy scope. Not wired into any other script and never run by CI.",
+    "deprecate:old": "npm deprecate \"@pegasusheavy/nestjs-platform-bun@*\" \"Renamed to @lexmata/nestjs-platform-bun\""
   },
   "keywords": [
     "nestjs",
@@ -38,11 +57,11 @@
     "adapter",
     "platform"
   ],
-  "author": "Pegasus Heavy Industries LLC",
+  "author": "Lexmata",
   "license": "MIT",
   "repository": {
     "type": "git",
-    "url": "https://github.com/PegasusHeavyIndustries/nestjs-bun"
+    "url": "git+https://github.com/quinnjr/nestjs-bun.git"
   },
   "peerDependencies": {
     "@nestjs/common": "^10.0.0 || ^11.0.0",
@@ -55,7 +74,6 @@
     "@nestjs/common": "^11.0.0",
     "@nestjs/core": "^11.0.0",
     "@types/bun": "^1.2.4",
-    "@vitest/coverage-v8": "^4.0.16",
     "eslint": "^9.18.0",
     "husky": "^9.1.7",
     "reflect-metadata": "^0.2.2",

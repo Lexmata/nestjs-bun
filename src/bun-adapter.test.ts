@@ -1,8 +1,36 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
+import {
+  RequestMethod,
+  VERSION_NEUTRAL,
+  VersioningType,
+  type VersioningOptions,
+} from "@nestjs/common";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { BunAdapter } from "./bun-adapter";
+import {
+  createExpressResponse,
+  type ExpressRequest,
+  type ExpressResponse,
+} from "./express-compat";
+import type { FastifyInstance } from "./fastify-compat";
+
+/**
+ * The handler shape the adapter's route-registration methods accept. Declared
+ * here because `RouteHandler` is internal to `bun-adapter.ts`.
+ */
+type TestRouteHandler = (
+  req: ExpressRequest,
+  res: ExpressResponse,
+  next: (err?: unknown) => void
+) => unknown;
 
 describe("BunAdapter", () => {
   let adapter: BunAdapter;
+
+  /** Base URL of the adapter's listening server. Call after `listen()`. */
+  const baseUrl = (): string => `http://localhost:${adapter.getHttpServer().server?.port}`;
 
   beforeEach(() => {
     adapter = new BunAdapter();
@@ -185,7 +213,7 @@ describe("BunAdapter", () => {
       await adapter.listen(0);
       const server = adapter.getHttpServer().server;
       const response = await fetch(`http://localhost:${server?.port}/users/123`);
-      const body = await response.json();
+      const body = (await response.json()) as Record<string, unknown>;
       expect(body.id).toBe("123");
     });
 
@@ -197,7 +225,7 @@ describe("BunAdapter", () => {
       await adapter.listen(0);
       const server = adapter.getHttpServer().server;
       const response = await fetch(`http://localhost:${server?.port}/users/1/posts/2`);
-      const body = await response.json();
+      const body = (await response.json()) as Record<string, unknown>;
       expect(body).toEqual({ userId: "1", postId: "2" });
     });
   });
@@ -248,7 +276,7 @@ describe("BunAdapter", () => {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ foo: "bar" }),
       });
-      const body = await response.json();
+      const body = (await response.json()) as Record<string, unknown>;
       expect(body).toEqual({ foo: "bar" });
     });
 
@@ -264,7 +292,7 @@ describe("BunAdapter", () => {
         headers: { "Content-Type": "application/x-www-form-urlencoded" },
         body: "foo=bar&baz=qux",
       });
-      const body = await response.json();
+      const body = (await response.json()) as Record<string, unknown>;
       expect(body).toEqual({ foo: "bar", baz: "qux" });
     });
 
@@ -299,7 +327,7 @@ describe("BunAdapter", () => {
         method: "POST",
         body: formData,
       });
-      const body = await response.json();
+      const body = (await response.json()) as Record<string, unknown>;
       expect(body.name).toBe("John");
     });
   });
@@ -313,7 +341,7 @@ describe("BunAdapter", () => {
 
       adapter.use(middlewareSpy);
       adapter.get("/test", (req, res) => {
-        res.send((req as Record<string, unknown>).customData);
+        res.send((req as unknown as Record<string, unknown>).customData);
       });
 
       await adapter.listen(0);
@@ -343,7 +371,7 @@ describe("BunAdapter", () => {
     });
 
     it("should handle middleware that ends response", async () => {
-      adapter.use((req, res, next) => {
+      adapter.use((req: ExpressRequest, res: ExpressResponse, next: (err?: unknown) => void) => {
         res.status(401).send("Unauthorized");
       });
       adapter.get("/test", (req, res) => res.send("should not reach"));
@@ -357,7 +385,7 @@ describe("BunAdapter", () => {
     });
 
     it("should handle error middleware", async () => {
-      adapter.use((req, res, next) => {
+      adapter.use((req: ExpressRequest, res: ExpressResponse, next: (err?: unknown) => void) => {
         next(new Error("Test error"));
       });
       adapter.use((err: unknown, req: unknown, res: Record<string, unknown>, next: () => void) => {
@@ -751,7 +779,7 @@ describe("BunAdapter", () => {
       await adapter.listen(0);
       const server = adapter.getHttpServer().server;
       const response = await fetch(`http://localhost:${server?.port}/test`);
-      const body = await response.json();
+      const body = (await response.json()) as Record<string, unknown>;
 
       expect(body).toEqual({ result: "value" });
     });
@@ -791,9 +819,16 @@ describe("BunAdapter", () => {
       expect(adapter.getRequestMethod(req)).toBe("POST");
     });
 
-    it("getRequestUrl should return pathname", () => {
+    it("getRequestUrl should return path including query, like Express originalUrl", () => {
       const req = new Request("http://example.com/path?foo=bar");
-      expect(adapter.getRequestUrl(req)).toBe("/path");
+      expect(adapter.getRequestUrl(req)).toBe("/path?foo=bar");
+    });
+
+    it("getRequestUrl should accept the relative url NestJS actually passes", () => {
+      // NestJS hands this the ExpressRequest, whose `url` is relative.
+      // `new URL()` rejects it, which used to turn every 404 into a 500.
+      const relative = { url: "/path?foo=bar" } as unknown as Request;
+      expect(adapter.getRequestUrl(relative)).toBe("/path?foo=bar");
     });
 
     it("end should be a no-op", () => {
@@ -801,10 +836,34 @@ describe("BunAdapter", () => {
       adapter.end({} as Response, "message");
     });
 
-    it("setHeader should return response", () => {
-      const res = {} as Response;
-      const result = adapter.setHeader(res, "X-Test", "value");
+    it("setHeader should mutate the ExpressResponse NestJS passes and return it", () => {
+      // NestJS discards the return value, so setHeader MUST mutate in place.
+      const res = createExpressResponse();
+      const result = adapter.setHeader(res as unknown as Response, "X-Test", "value");
       expect(result).toBe(res);
+      expect(res.getHeader("X-Test")).toBe("value");
+    });
+
+    it("appendHeader should mutate the ExpressResponse in place", () => {
+      const res = createExpressResponse();
+      adapter.appendHeader(res as unknown as Response, "X-Multi", "a");
+      adapter.appendHeader(res as unknown as Response, "X-Multi", "b");
+      expect(res.getHeader("X-Multi")).toContain("a");
+      expect(res.getHeader("X-Multi")).toContain("b");
+    });
+
+    it("status should set the status on the ExpressResponse", () => {
+      const res = createExpressResponse();
+      const result = adapter.status(res as unknown as Response, 201);
+      expect(result).toBe(res);
+      expect(res._statusCode).toBe(201);
+    });
+
+    it("redirect should set Location on the ExpressResponse, including relative urls", () => {
+      const res = createExpressResponse();
+      adapter.redirect(res as unknown as Response, 302, "/login");
+      expect(res._statusCode).toBe(302);
+      expect(res.getHeader("Location")).toBe("/login");
     });
 
     it("isHeadersSent should return false", () => {
@@ -821,64 +880,171 @@ describe("BunAdapter", () => {
       // Just verify it doesn't throw
     });
 
-    it("setViewEngine should be a no-op", () => {
-      // Should not throw
-      adapter.setViewEngine("ejs");
+    it("setViewEngine should throw because view engines are unsupported", () => {
+      // Failing loudly at bootstrap beats a silent empty 200 per request.
+      expect(() => adapter.setViewEngine("ejs")).toThrow("not supported");
     });
 
-    it("render should throw not implemented", () => {
-      expect(() => adapter.render({} as Response, "view", {})).toThrow("not implemented");
+    it("render should throw because view rendering is unsupported", () => {
+      expect(() => adapter.render({} as Response, "view", {})).toThrow("not supported");
     });
 
-    it("redirect should be a no-op", () => {
-      // Should not throw
-      adapter.redirect({} as Response, 302, "/new-path");
+    // `applyVersionFilter` and `createMiddlewareFactory` used to be asserted
+    // here with `expect(typeof result).toBe("function")`, which passes for
+    // `() => {}` and so measured nothing. They are exercised through real
+    // requests in the "API versioning" and "createMiddlewareFactory" suites
+    // below instead.
+
+    it("getHeader should read a header back off the ExpressResponse NestJS passes", () => {
+      const res = createExpressResponse();
+      res.set("X-Test", "value");
+
+      expect(adapter.getHeader(res as unknown as Response, "X-Test")).toBe("value");
     });
 
-    it("setLocal should throw not implemented", () => {
-      expect(() => adapter.setLocal("key", "value")).toThrow("not implemented");
+    it("getHeader should return undefined for a header absent from an ExpressResponse", () => {
+      const res = createExpressResponse();
+
+      expect(adapter.getHeader(res as unknown as Response, "X-Absent")).toBeUndefined();
     });
 
-    it("applyVersionFilter should return handler wrapper", () => {
-      const handler = vi.fn();
-      const result = adapter.applyVersionFilter(handler, "1", {});
-      expect(typeof result).toBe("function");
-    });
+    it("getHeader should fall back to a native Response's headers", () => {
+      const native = new Response("body", { headers: { "X-Native": "native-value" } });
 
-    it("createMiddlewareFactory should return factory function", () => {
-      const factory = adapter.createMiddlewareFactory(0); // GET
-      expect(typeof factory).toBe("function");
+      expect(adapter.getHeader(native, "X-Native")).toBe("native-value");
+      expect(adapter.getHeader(native, "X-Absent")).toBeUndefined();
     });
   });
 
   describe("static assets", () => {
-    it("should serve static files", async () => {
-      // Create a temporary test file
-      const testDir = "/tmp/bun-adapter-test";
-      await Bun.write(`${testDir}/test.txt`, "Hello from static file");
+    // Each test gets its own throwaway tree, removed afterwards. The previous
+    // fixed "/tmp/bun-adapter-test" paths leaked between runs, so a file written
+    // by an earlier run could satisfy a later assertion.
+    const DOTFILE_SECRET = "DOTFILE-SHOULD-NEVER-BE-SERVED";
+    const SIBLING_SECRET = "SIBLING-SHOULD-NEVER-BE-SERVED";
 
-      adapter.useStaticAssets(testDir);
+    let tempRoot: string;
+    let assetsRoot: string;
 
-      await adapter.listen(0);
-      const server = adapter.getHttpServer().server;
-      const response = await fetch(`http://localhost:${server?.port}/test.txt`);
-      const body = await response.text();
-
-      expect(body).toBe("Hello from static file");
+    beforeEach(() => {
+      tempRoot = mkdtempSync(join(tmpdir(), "bun-adapter-assets-"));
+      assetsRoot = join(tempRoot, "assets");
+      mkdirSync(assetsRoot);
+      writeFileSync(join(assetsRoot, "test.txt"), "Hello from static file");
+      // Dotfiles are exactly what a static root leaks by accident (.env,
+      // .git/config), so serve-static refuses them and so must this.
+      writeFileSync(join(assetsRoot, ".gitignore"), DOTFILE_SECRET);
+      // A SIBLING directory whose name has the root as a string prefix. A
+      // `startsWith(root)` check without the trailing separator would serve it.
+      mkdirSync(join(tempRoot, "assets-evil"));
+      writeFileSync(join(tempRoot, "assets-evil", "secret"), SIBLING_SECRET);
     });
 
-    it("should serve static files with prefix", async () => {
-      const testDir = "/tmp/bun-adapter-test2";
-      await Bun.write(`${testDir}/test.txt`, "Hello with prefix");
+    afterEach(() => {
+      rmSync(tempRoot, { recursive: true, force: true });
+    });
 
-      adapter.useStaticAssets(testDir, { prefix: "/static" });
-
+    /** Serve `assetsRoot`, start listening, and return the base URL. */
+    const serveAssets = async (options?: { prefix?: string }): Promise<string> => {
+      adapter.useStaticAssets(assetsRoot, options);
       await adapter.listen(0);
-      const server = adapter.getHttpServer().server;
-      const response = await fetch(`http://localhost:${server?.port}/static/test.txt`);
-      const body = await response.text();
+      return baseUrl();
+    };
 
-      expect(body).toBe("Hello with prefix");
+    it("should serve a file from the static root", async () => {
+      const base = await serveAssets();
+
+      const response = await fetch(`${base}/test.txt`);
+
+      expect(response.status).toBe(200);
+      expect(await response.text()).toBe("Hello from static file");
+      // Static content is attacker-influenced wherever users can populate the
+      // root, so MIME sniffing must be refused.
+      expect(response.headers.get("X-Content-Type-Options")).toBe("nosniff");
+    });
+
+    it("should serve a file under a configured prefix", async () => {
+      const base = await serveAssets({ prefix: "/static" });
+
+      const response = await fetch(`${base}/static/test.txt`);
+
+      expect(response.status).toBe(200);
+      expect(await response.text()).toBe("Hello from static file");
+    });
+
+    it("should fall through to 404 for a file that does not exist", async () => {
+      const base = await serveAssets();
+
+      const response = await fetch(`${base}/absent.txt`);
+
+      expect(response.status).toBe(404);
+    });
+
+    it("should fall through for methods other than GET and HEAD", async () => {
+      const base = await serveAssets();
+
+      const response = await fetch(`${base}/test.txt`, { method: "POST" });
+
+      expect(response.status).toBe(404);
+    });
+
+    it("should refuse a plain ../ traversal", async () => {
+      const base = await serveAssets();
+
+      // NOTE: the client collapses "/../.." before the request leaves, so the
+      // server sees "/etc/passwd". Asserted anyway because it is the form an
+      // operator will reach for, and it must never return file contents.
+      const response = await fetch(`${base}/../../etc/passwd`);
+
+      expect(response.status).toBe(404);
+      expect(await response.text()).not.toContain("root:");
+    });
+
+    it("should refuse a percent-encoded ../ traversal", async () => {
+      const base = await serveAssets();
+
+      // %2e%2e%2f survives URL normalisation, so this reaches the adapter with
+      // the traversal intact - the case the lexical check actually has to catch.
+      const response = await fetch(`${base}/%2e%2e%2f%2e%2e%2fetc%2fpasswd`);
+
+      expect(response.status).toBe(404);
+      expect(await response.text()).not.toContain("root:");
+    });
+
+    it("should refuse a path containing a NUL byte", async () => {
+      const base = await serveAssets();
+
+      const response = await fetch(`${base}/%00test.txt`);
+
+      expect(response.status).toBe(404);
+      expect(await response.text()).not.toContain("Hello from static file");
+    });
+
+    it("should refuse a malformed percent-escape instead of throwing", async () => {
+      const base = await serveAssets();
+
+      // decodeURIComponent throws on this; the request must 404, not 500.
+      const response = await fetch(`${base}/%E0%A4%A`);
+
+      expect(response.status).toBe(404);
+    });
+
+    it("should refuse a dotfile", async () => {
+      const base = await serveAssets();
+
+      const response = await fetch(`${base}/.gitignore`);
+
+      expect(response.status).toBe(404);
+      expect(await response.text()).not.toContain(DOTFILE_SECRET);
+    });
+
+    it("should refuse a sibling directory that merely shares the root's prefix", async () => {
+      const base = await serveAssets();
+
+      const response = await fetch(`${base}/%2e%2e%2fassets-evil%2fsecret`);
+
+      expect(response.status).toBe(404);
+      expect(await response.text()).not.toContain(SIBLING_SECRET);
     });
   });
 
@@ -909,13 +1075,70 @@ describe("BunAdapter", () => {
         headers: { "Content-Type": "application/json" },
         body: "invalid json{",
       });
-      const body = await response.json();
+      const body = (await response.json()) as Record<string, unknown>;
 
       expect(body.body).toBeUndefined();
     });
   });
 
   describe("Fastify hooks lifecycle", () => {
+    it("should run hooks in Fastify's documented order", async () => {
+      // Fastify's order is onRequest -> preValidation -> preHandler -> handler
+      // -> preSerialization -> onSend -> onResponse. preValidation previously
+      // ran AFTER preHandler here, the reverse of upstream.
+      const order: string[] = [];
+      adapter.addHook("onRequest", (req, reply, done) => {
+        order.push("onRequest");
+        done();
+      });
+      adapter.addHook("preValidation", (req, reply, done) => {
+        order.push("preValidation");
+        done();
+      });
+      adapter.addHook("preHandler", (req, reply, done) => {
+        order.push("preHandler");
+        done();
+      });
+      adapter.addHook("preSerialization", (req, reply, payload, done) => {
+        order.push("preSerialization");
+        done(undefined, payload);
+      });
+      adapter.addHook("onSend", (req, reply, payload, done) => {
+        order.push("onSend");
+        done(undefined, payload);
+      });
+      adapter.addHook("onResponse", (req, reply, done) => {
+        order.push("onResponse");
+        done();
+      });
+
+      adapter.get("/ordered", (req, res) => {
+        order.push("handler");
+        res.send("ok");
+      });
+
+      await adapter.listen(0);
+      const server = adapter.getHttpServer().server;
+      await fetch(`http://localhost:${server?.port}/ordered`);
+
+      expect(order).toEqual([
+        "onRequest",
+        "preValidation",
+        "preHandler",
+        "handler",
+        "preSerialization",
+        "onSend",
+        "onResponse",
+      ]);
+    });
+
+    it("should reject an unsupported hook name instead of silently dropping it", () => {
+      // Registering an unknown hook used to return success and never run it.
+      expect(() =>
+        (adapter.addHook as unknown as (n: string, h: () => void) => void)("preParsing", () => {})
+      ).toThrow();
+    });
+
     it("should handle onRequest hook error", async () => {
       adapter.addHook("onRequest", (req, reply, done) => {
         done(new Error("onRequest error"));
@@ -1036,10 +1259,13 @@ describe("BunAdapter", () => {
     });
   });
 
-  describe("middleware not calling next", () => {
-    it("should stop chain when next not called and response not ended", async () => {
-      adapter.use((req, res, next) => {
-        // Don't call next, but don't end response either
+  describe("middleware completion signalling", () => {
+    it("should fail the request when middleware never signals", async () => {
+      // Previously this returned an empty 200, reporting success for a request
+      // that was never handled. It now fails once middlewareTimeout elapses.
+      adapter.setServerOptions({ middlewareTimeout: 50 });
+      adapter.use(() => {
+        // Never calls next, never ends the response.
       });
       adapter.get("/test", (req, res) => res.send("should not reach"));
 
@@ -1047,8 +1273,794 @@ describe("BunAdapter", () => {
       const server = adapter.getHttpServer().server;
       const response = await fetch(`http://localhost:${server?.port}/test`);
 
-      // Response should be empty since middleware didn't end it
+      expect(response.status).toBe(500);
+    });
+
+    it("should continue the chain when middleware calls next() asynchronously", async () => {
+      // Callback-style middleware (express-session, passport, multer) calls
+      // next() from a later tick. Sampling it synchronously ended the chain
+      // early and returned an empty 200 without ever running the handler.
+      adapter.use((req: ExpressRequest, res: ExpressResponse, next: (err?: unknown) => void) => {
+        setTimeout(() => next(), 10);
+      });
+      adapter.get("/async-next", (req, res) => res.send("handler reached"));
+
+      await adapter.listen(0);
+      const server = adapter.getHttpServer().server;
+      const response = await fetch(`http://localhost:${server?.port}/async-next`);
+
       expect(response.status).toBe(200);
+      expect(await response.text()).toBe("handler reached");
+    });
+
+    it("should surface an error passed to next() from a later tick", async () => {
+      adapter.use((req: ExpressRequest, res: ExpressResponse, next: (err?: unknown) => void) => {
+        setTimeout(() => next(new Error("async failure")), 10);
+      });
+      adapter.get("/async-err", (req, res) => res.send("should not reach"));
+
+      await adapter.listen(0);
+      const server = adapter.getHttpServer().server;
+      const response = await fetch(`http://localhost:${server?.port}/async-err`);
+
+      expect(response.status).toBe(500);
+    });
+  });
+
+  describe("extended (WebDAV) verbs", () => {
+    // AbstractHttpAdapter declares each of these and NestJS's
+    // RouterMethodFactory resolves @Search()/@Propfind()/... to `adapter[verb]`,
+    // falling back to `use` only when the method is ABSENT. The inherited
+    // implementations forward to `this.instance[verb]`, which does not exist on
+    // the Bun server wrapper - so without these overrides a controller using one
+    // of the decorators would TypeError at bootstrap. That claim is what these
+    // tests hold to: every verb must actually route.
+    const EXTENDED_VERBS = [
+      "search",
+      "propfind",
+      "proppatch",
+      "mkcol",
+      "copy",
+      "move",
+      "lock",
+      "unlock",
+    ] as const;
+
+    type ExtendedVerb = (typeof EXTENDED_VERBS)[number];
+    type PathRegistrar = (path: string, handler: TestRouteHandler) => void;
+    type BareRegistrar = (handler: TestRouteHandler) => void;
+
+    const registerWithPath = (verb: ExtendedVerb, path: string, handler: TestRouteHandler): void => {
+      (adapter[verb] as unknown as PathRegistrar).call(adapter, path, handler);
+    };
+
+    for (const verb of EXTENDED_VERBS) {
+      const method = verb.toUpperCase();
+
+      it(`should route ${method} to a handler registered via adapter.${verb}(path, handler)`, async () => {
+        registerWithPath(verb, "/res", (req, res) => res.send(method));
+
+        await adapter.listen(0);
+        const response = await fetch(`${baseUrl()}/res`, { method });
+
+        expect(response.status).toBe(200);
+        expect(await response.text()).toBe(method);
+      });
+    }
+
+    it("should register at / when given only a handler", async () => {
+      (adapter.search as unknown as BareRegistrar).call(adapter, (req, res) =>
+        res.send("root-search")
+      );
+
+      await adapter.listen(0);
+      const response = await fetch(`${baseUrl()}/`, { method: "SEARCH" });
+
+      expect(response.status).toBe(200);
+      expect(await response.text()).toBe("root-search");
+    });
+
+    it("should 404 an extended verb that was never registered", async () => {
+      registerWithPath("search", "/res", (req, res) => res.send("SEARCH"));
+
+      await adapter.listen(0);
+      const response = await fetch(`${baseUrl()}/res`, { method: "MKCOL" });
+
+      expect(response.status).toBe(404);
+    });
+  });
+
+  describe("Fastify plugin instance facade", () => {
+    it("should serve a route registered through instance.get()", async () => {
+      adapter.register(async (instance) => {
+        instance.get("/plugin", async (req, reply) => {
+          reply.send({ ok: true });
+        });
+      });
+
+      await adapter.listen(0);
+      const response = await fetch(`${baseUrl()}/plugin`);
+
+      expect(response.status).toBe(200);
+      expect(await response.json()).toEqual({ ok: true });
+    });
+
+    it("should serve every verb registered through the plugin instance", async () => {
+      const seen: string[] = [];
+
+      adapter.register(async (instance) => {
+        instance.get("/i/get", async (req, reply) => {
+          seen.push("get");
+          reply.send("get");
+        });
+        instance.post("/i/post", async (req, reply) => {
+          seen.push("post");
+          reply.send("post");
+        });
+        instance.put("/i/put", async (req, reply) => {
+          seen.push("put");
+          reply.send("put");
+        });
+        instance.delete("/i/delete", async (req, reply) => {
+          seen.push("delete");
+          reply.send("delete");
+        });
+        instance.patch("/i/patch", async (req, reply) => {
+          seen.push("patch");
+          reply.send("patch");
+        });
+        instance.options("/i/options", async (req, reply) => {
+          seen.push("options");
+          reply.send("options");
+        });
+        // No body: exercises the `reply._body == null` branch, which must end
+        // the response rather than send a literal "null".
+        instance.head("/i/head", async (req, reply) => {
+          seen.push("head");
+          reply.code(204).send();
+        });
+        instance.all("/i/all", async (req, reply) => {
+          seen.push("all");
+          reply.send("all");
+        });
+      });
+
+      await adapter.listen(0);
+      const base = baseUrl();
+
+      for (const [path, method] of [
+        ["/i/get", "GET"],
+        ["/i/post", "POST"],
+        ["/i/put", "PUT"],
+        ["/i/delete", "DELETE"],
+        ["/i/patch", "PATCH"],
+        ["/i/options", "OPTIONS"],
+      ] as const) {
+        const response = await fetch(`${base}${path}`, { method });
+        expect(response.status).toBe(200);
+        expect(await response.text()).toBe(method.toLowerCase());
+      }
+
+      const headResponse = await fetch(`${base}/i/head`, { method: "HEAD" });
+      expect(headResponse.status).toBe(204);
+      expect(await headResponse.text()).toBe("");
+
+      // `all` answers regardless of verb.
+      expect(await (await fetch(`${base}/i/all`)).text()).toBe("all");
+      expect(await (await fetch(`${base}/i/all`, { method: "POST" })).text()).toBe("all");
+
+      expect(seen).toEqual([
+        "get",
+        "post",
+        "put",
+        "delete",
+        "patch",
+        "options",
+        "head",
+        "all",
+        "all",
+      ]);
+    });
+
+    it("should expose a decorator added by one plugin to plugins registered after it", async () => {
+      // applyInstanceDecorators() binds the registry to the instance BEFORE any
+      // plugin runs; if that ordering regresses, `instance.db` reads undefined
+      // in the second plugin while hasDecorator() still reports true.
+      const connection = { name: "db-connection" };
+      let seenConnection: unknown = "not-read";
+      let hadDecorator: boolean | undefined;
+
+      adapter.register(async (instance) => {
+        instance.decorate("db", connection);
+      });
+      adapter.register(async (instance) => {
+        hadDecorator = instance.hasDecorator("db");
+        seenConnection = (instance as FastifyInstance & { db?: unknown }).db;
+      });
+
+      await adapter.listen(0);
+
+      expect(hadDecorator).toBe(true);
+      expect(seenConnection).toBe(connection);
+    });
+
+    it("should apply request and reply decorators registered through the instance", async () => {
+      let hadRequestDecorator: boolean | undefined;
+      let hadReplyDecorator: boolean | undefined;
+
+      adapter.register(async (instance) => {
+        instance.decorateRequest("tenant", "acme");
+        instance.decorateReply("channel", "web");
+        hadRequestDecorator = instance.hasRequestDecorator("tenant");
+        hadReplyDecorator = instance.hasReplyDecorator("channel");
+
+        instance.get("/decorated", async (req, reply) => {
+          reply.send({
+            tenant: (req as typeof req & { tenant?: string }).tenant,
+            channel: (reply as typeof reply & { channel?: string }).channel,
+          });
+        });
+      });
+
+      await adapter.listen(0);
+      const response = await fetch(`${baseUrl()}/decorated`);
+
+      expect(hadRequestDecorator).toBe(true);
+      expect(hadReplyDecorator).toBe(true);
+      expect(await response.json()).toEqual({ tenant: "acme", channel: "web" });
+    });
+
+    it("should run a hook added through instance.addHook()", async () => {
+      const fired: string[] = [];
+
+      adapter.register(async (instance) => {
+        instance.addHook("onRequest", (req, reply, done) => {
+          fired.push("onRequest");
+          done();
+        });
+      });
+      adapter.get("/hooked", (req, res) => {
+        fired.push("handler");
+        res.send("ok");
+      });
+
+      await adapter.listen(0);
+      const response = await fetch(`${baseUrl()}/hooked`);
+
+      expect(response.status).toBe(200);
+      expect(fired).toEqual(["onRequest", "handler"]);
+    });
+
+    it("should initialise a plugin registered by another plugin", async () => {
+      const order: string[] = [];
+
+      adapter.register(async (instance) => {
+        order.push("outer");
+        instance.register(async (inner) => {
+          order.push("inner");
+          inner.get("/nested", async (req, reply) => {
+            reply.send("from nested plugin");
+          });
+        });
+      });
+
+      await adapter.listen(0);
+      const response = await fetch(`${baseUrl()}/nested`);
+
+      expect(order).toEqual(["outer", "inner"]);
+      expect(await response.text()).toBe("from nested plugin");
+    });
+
+    it("should use a value returned by a plugin route handler as the body", async () => {
+      adapter.register(async (instance) => {
+        instance.get("/returned", async () => ({ from: "return value" }));
+      });
+
+      await adapter.listen(0);
+      const response = await fetch(`${baseUrl()}/returned`);
+
+      expect(response.status).toBe(200);
+      expect(await response.json()).toEqual({ from: "return value" });
+    });
+
+    it("should answer 200 with an empty body when a plugin handler neither sends nor returns", async () => {
+      adapter.register(async (instance) => {
+        instance.get("/silent", async () => {
+          // Deliberately neither replies nor returns a value.
+        });
+      });
+
+      await adapter.listen(0);
+      const response = await fetch(`${baseUrl()}/silent`);
+
+      expect(response.status).toBe(200);
+      expect(await response.text()).toBe("");
+    });
+
+    it("should surface a throw inside a plugin route handler as a 500", async () => {
+      adapter.register(async (instance) => {
+        instance.get("/plugin-throws", async () => {
+          throw new Error("plugin handler exploded");
+        });
+      });
+
+      await adapter.listen(0);
+      const response = await fetch(`${baseUrl()}/plugin-throws`);
+
+      expect(response.status).toBe(500);
+      expect(await response.json()).toEqual({
+        statusCode: 500,
+        message: "plugin handler exploded",
+      });
+    });
+  });
+
+  describe("onSend payload rewriting", () => {
+    it("should replace the body with a string returned by an onSend hook", async () => {
+      adapter.addHook("onSend", (req, reply, payload, done) => done(undefined, "rewritten"));
+      adapter.get("/rewrite", (req, res) => res.send("original"));
+
+      await adapter.listen(0);
+      const response = await fetch(`${baseUrl()}/rewrite`);
+
+      expect(response.status).toBe(200);
+      expect(await response.text()).toBe("rewritten");
+    });
+
+    it("should drop the body when an onSend hook returns null", async () => {
+      adapter.addHook("onSend", (req, reply, payload, done) => done(undefined, null));
+      adapter.get("/cleared", (req, res) => res.send("original"));
+
+      await adapter.listen(0);
+      const response = await fetch(`${baseUrl()}/cleared`);
+
+      expect(response.status).toBe(200);
+      expect(await response.text()).toBe("");
+      // Bun frames the empty body itself; what matters is that the original
+      // payload's length is gone.
+      expect(Number(response.headers.get("content-length") ?? "0")).toBe(0);
+    });
+
+    it("should refuse to attach a body to a 204 even when onSend supplies one", async () => {
+      // A 204 with Content-Length mis-frames the next response on a keep-alive
+      // connection, so the payload must be discarded rather than attached.
+      adapter.addHook("onSend", (req, reply, payload, done) => done(undefined, "should be dropped"));
+      adapter.get("/no-content", (req, res) => {
+        res.status(204).end();
+      });
+
+      await adapter.listen(0);
+      const response = await fetch(`${baseUrl()}/no-content`);
+
+      expect(response.status).toBe(204);
+      expect(await response.text()).toBe("");
+      expect(Number(response.headers.get("content-length") ?? "0")).toBe(0);
+    });
+
+    it("should pass binary payloads through unchanged and keep the content type", async () => {
+      const bytes = new TextEncoder().encode("binary-payload");
+      adapter.addHook("onSend", (req, reply, payload, done) => done(undefined, bytes));
+      adapter.get("/binary", (req, res) => {
+        res.type("text/plain").send("original");
+      });
+
+      await adapter.listen(0);
+      const response = await fetch(`${baseUrl()}/binary`);
+
+      expect(response.headers.get("content-type")).toContain("text/plain");
+      expect(await response.text()).toBe("binary-payload");
+    });
+
+    it("should JSON-encode an object payload and default the content type", async () => {
+      adapter.addHook("onSend", (req, reply, payload, done) => done(undefined, { replaced: true }));
+      // `end()` leaves no Content-Type, so withPayload has to supply one.
+      adapter.get("/object", (req, res) => {
+        res.end();
+      });
+
+      await adapter.listen(0);
+      const response = await fetch(`${baseUrl()}/object`);
+
+      expect(response.headers.get("content-type")).toContain("application/json");
+      expect(await response.json()).toEqual({ replaced: true });
+    });
+  });
+
+  describe("404 lifecycle", () => {
+    it("should run onSend and onResponse hooks for an unmatched route", async () => {
+      // Skipping the reply lifecycle on the not-found path silently dropped
+      // every 404 from access logs and latency metrics.
+      const fired: string[] = [];
+      let sawNotFoundFlag: boolean | undefined;
+
+      adapter.addHook("onSend", (req, reply, payload, done) => {
+        fired.push("onSend");
+        done(undefined, payload);
+      });
+      adapter.addHook("onResponse", (req, reply, done) => {
+        fired.push("onResponse");
+        sawNotFoundFlag = req.is404;
+        done();
+      });
+
+      await adapter.listen(0);
+      const response = await fetch(`${baseUrl()}/no-such-route`);
+
+      expect(response.status).toBe(404);
+      expect(fired).toEqual(["onSend", "onResponse"]);
+      expect(sawNotFoundFlag).toBe(true);
+    });
+
+    it("should let an onSend hook rewrite the 404 payload", async () => {
+      adapter.addHook("onSend", (req, reply, payload, done) => done(undefined, "nothing here"));
+
+      await adapter.listen(0);
+      const response = await fetch(`${baseUrl()}/no-such-route`);
+
+      expect(response.status).toBe(404);
+      expect(await response.text()).toBe("nothing here");
+    });
+  });
+
+  describe("route fall-through", () => {
+    it("should run the next matching route when a handler declines with next()", async () => {
+      const order: string[] = [];
+      adapter.get("/multi", (req, res, next) => {
+        order.push("first");
+        next();
+      });
+      adapter.get("/multi", (req, res) => {
+        order.push("second");
+        res.send("second");
+      });
+
+      await adapter.listen(0);
+      const response = await fetch(`${baseUrl()}/multi`);
+
+      expect(order).toEqual(["first", "second"]);
+      expect(await response.text()).toBe("second");
+    });
+
+    it("should rebind params when falling through to a differently-named parameter", async () => {
+      // toEqual (not toMatchObject) on purpose: a stale "id" key left behind
+      // from the first route would make the second handler's params wrong in a
+      // way a subset match would not catch.
+      const seen: Array<Record<string, string>> = [];
+      adapter.get("/items/:id", (req, res, next) => {
+        seen.push({ ...req.params });
+        next();
+      });
+      adapter.get("/items/:slug", (req, res) => {
+        seen.push({ ...req.params });
+        res.send("ok");
+      });
+
+      await adapter.listen(0);
+      await fetch(`${baseUrl()}/items/42`);
+
+      expect(seen[0]).toEqual({ id: "42" });
+      expect(seen[1]).toEqual({ slug: "42" });
+    });
+
+    it("should 404 - not empty-200 - when every matching handler declines", async () => {
+      adapter.get("/declined", (req, res, next) => next());
+      adapter.get("/declined", (req, res, next) => next());
+
+      await adapter.listen(0);
+      const response = await fetch(`${baseUrl()}/declined`);
+
+      expect(response.status).toBe(404);
+      expect(await response.json()).toEqual({ statusCode: 404, message: "Not Found" });
+    });
+
+    it("should serve HEAD from the matching GET handler", async () => {
+      const handler = vi.fn((req: ExpressRequest, res: ExpressResponse) => res.send("body-text"));
+      adapter.get("/head-from-get", handler);
+
+      await adapter.listen(0);
+      const response = await fetch(`${baseUrl()}/head-from-get`, { method: "HEAD" });
+
+      expect(response.status).toBe(200);
+      expect(handler).toHaveBeenCalledTimes(1);
+      // HEAD carries the headers but never the body.
+      expect(await response.text()).toBe("");
+      expect(response.headers.get("content-length")).toBe("9");
+    });
+  });
+
+  describe("rawBody capture", () => {
+    it("should expose the exact request bytes alongside the parsed body", async () => {
+      adapter.initHttpServer({ rawBody: true });
+      // Odd whitespace: byte-exact capture is the whole point for webhook
+      // signature verification, and re-serialising the parsed value loses it.
+      const raw = '{"a":  1}';
+      adapter.post("/raw", (req, res) => {
+        res.json({
+          raw: (req as ExpressRequest & { rawBody?: Buffer }).rawBody?.toString(),
+          parsed: req.body,
+        });
+      });
+
+      await adapter.listen(0);
+      const response = await fetch(`${baseUrl()}/raw`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: raw,
+      });
+
+      expect(await response.json()).toEqual({ raw, parsed: { a: 1 } });
+    });
+
+    it("should leave rawBody undefined when raw capture was not requested", async () => {
+      adapter.post("/raw", (req, res) => {
+        res.json({
+          hasRaw: (req as ExpressRequest & { rawBody?: Buffer }).rawBody !== undefined,
+          parsed: req.body,
+        });
+      });
+
+      await adapter.listen(0);
+      const response = await fetch(`${baseUrl()}/raw`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: '{"a":  1}',
+      });
+
+      expect(await response.json()).toEqual({ hasRaw: false, parsed: { a: 1 } });
+    });
+  });
+
+  describe("API versioning", () => {
+    // applyVersionFilter's contract is "run the handler, or defer to the next
+    // matching route". Registering a second handler on the same path makes both
+    // outcomes observable: "versioned" means it ran, "fallback" means it
+    // deferred. Asserting only that the filter is a function - as this suite
+    // used to - passes for a filter that never defers, and for one that never runs.
+    const mountVersioned = (version: string | symbol | Array<string | symbol>, options: VersioningOptions): void => {
+      const handler = (req: ExpressRequest, res: ExpressResponse): void => res.send("versioned");
+      const filtered = adapter.applyVersionFilter(handler, version, options);
+      adapter.get("/v", filtered as unknown as TestRouteHandler);
+      adapter.get("/v", (req, res) => res.send("fallback"));
+    };
+
+    const requestVersion = async (headers?: Record<string, string>): Promise<string> => {
+      await adapter.listen(0);
+      const response = await fetch(`${baseUrl()}/v`, { headers });
+      return response.text();
+    };
+
+    describe("HEADER strategy", () => {
+      const options: VersioningOptions = {
+        type: VersioningType.HEADER,
+        header: "X-API-Version",
+      };
+
+      it("should invoke the handler when the header matches", async () => {
+        mountVersioned("2", options);
+
+        expect(await requestVersion({ "X-API-Version": "2" })).toBe("versioned");
+      });
+
+      it("should defer when the header names a different version", async () => {
+        mountVersioned("2", options);
+
+        expect(await requestVersion({ "X-API-Version": "1" })).toBe("fallback");
+      });
+
+      it("should defer when the header is absent", async () => {
+        mountVersioned("2", options);
+
+        expect(await requestVersion()).toBe("fallback");
+      });
+
+      it("should accept any member of an array of versions", async () => {
+        mountVersioned(["2", "3"], options);
+
+        expect(await requestVersion({ "X-API-Version": "3" })).toBe("versioned");
+      });
+
+      it("should still defer for a version outside an array of versions", async () => {
+        mountVersioned(["2", "3"], options);
+
+        expect(await requestVersion({ "X-API-Version": "4" })).toBe("fallback");
+      });
+    });
+
+    describe("MEDIA_TYPE strategy", () => {
+      const options: VersioningOptions = {
+        type: VersioningType.MEDIA_TYPE,
+        key: "v=",
+      };
+
+      it("should invoke the handler when the Accept parameter matches", async () => {
+        mountVersioned("2", options);
+
+        expect(await requestVersion({ Accept: "application/json;v=2" })).toBe("versioned");
+      });
+
+      it("should defer when Accept carries no version parameter", async () => {
+        mountVersioned("2", options);
+
+        expect(await requestVersion({ Accept: "application/json" })).toBe("fallback");
+      });
+
+      it("should defer when the version parameter is present but empty", async () => {
+        mountVersioned("2", options);
+
+        expect(await requestVersion({ Accept: "application/json;v=" })).toBe("fallback");
+      });
+
+      it("should defer when no key is configured", async () => {
+        mountVersioned("2", { type: VersioningType.MEDIA_TYPE, key: "" });
+
+        expect(await requestVersion({ Accept: "application/json;v=2" })).toBe("fallback");
+      });
+    });
+
+    describe("CUSTOM strategy", () => {
+      it("should use the first element when the extractor returns an array", async () => {
+        mountVersioned("3", {
+          type: VersioningType.CUSTOM,
+          extractor: () => ["3", "2"],
+        });
+
+        expect(await requestVersion()).toBe("versioned");
+      });
+
+      it("should ignore later elements of the extractor's array", async () => {
+        // "2" is in the array but not first, so it must NOT match - otherwise
+        // the extractor's precedence order is meaningless.
+        mountVersioned("2", {
+          type: VersioningType.CUSTOM,
+          extractor: () => ["3", "2"],
+        });
+
+        expect(await requestVersion()).toBe("fallback");
+      });
+
+      it("should accept a bare string from the extractor", async () => {
+        mountVersioned("2", {
+          type: VersioningType.CUSTOM,
+          extractor: () => "2",
+        });
+
+        expect(await requestVersion()).toBe("versioned");
+      });
+    });
+
+    it("should always invoke a VERSION_NEUTRAL handler", async () => {
+      mountVersioned(VERSION_NEUTRAL, {
+        type: VersioningType.HEADER,
+        header: "X-API-Version",
+      });
+
+      expect(await requestVersion({ "X-API-Version": "99" })).toBe("versioned");
+    });
+
+    it("should invoke URI-versioned handlers unconditionally", async () => {
+      // NestJS resolves URI versions through the route path, so reaching the
+      // handler already means the version matched.
+      mountVersioned("9", { type: VersioningType.URI });
+
+      expect(await requestVersion()).toBe("versioned");
+    });
+
+    it("should defer for an unrecognised versioning strategy", async () => {
+      mountVersioned("1", { type: 999 } as unknown as VersioningOptions);
+
+      expect(await requestVersion()).toBe("fallback");
+    });
+  });
+
+  describe("createMiddlewareFactory", () => {
+    it("should run consumer middleware before the controller and still return the controller's body", async () => {
+      // Regression guard: this factory used to register a ROUTE, which matched
+      // ahead of every controller, called next(), and left the controller's
+      // response unreachable - consumer middleware shadowed the whole app.
+      const order: string[] = [];
+      const factory = adapter.createMiddlewareFactory(RequestMethod.GET);
+      factory("/api", (req: ExpressRequest, res: ExpressResponse, next: (err?: unknown) => void) => {
+        order.push("mw");
+        next();
+      });
+      adapter.get("/api", (req, res) => {
+        order.push("handler");
+        res.send("handler-body");
+      });
+
+      await adapter.listen(0);
+      const response = await fetch(`${baseUrl()}/api`);
+
+      expect(order).toEqual(["mw", "handler"]);
+      expect(response.status).toBe(200);
+      expect(await response.text()).toBe("handler-body");
+    });
+
+    it("should skip method-scoped middleware for a different verb", async () => {
+      const order: string[] = [];
+      const factory = adapter.createMiddlewareFactory(RequestMethod.POST);
+      factory("/api", (req: ExpressRequest, res: ExpressResponse, next: (err?: unknown) => void) => {
+        order.push("mw");
+        next();
+      });
+      adapter.all("/api", (req, res) => {
+        order.push("handler");
+        res.send("handler-body");
+      });
+
+      await adapter.listen(0);
+      const base = baseUrl();
+
+      await fetch(`${base}/api`);
+      expect(order).toEqual(["handler"]);
+
+      await fetch(`${base}/api`, { method: "POST" });
+      expect(order).toEqual(["handler", "mw", "handler"]);
+    });
+
+    it("should run RequestMethod.ALL middleware for every verb", async () => {
+      const order: string[] = [];
+      const factory = adapter.createMiddlewareFactory(RequestMethod.ALL);
+      factory("/api", (req: ExpressRequest, res: ExpressResponse, next: (err?: unknown) => void) => {
+        order.push(`mw:${req.method}`);
+        next();
+      });
+      adapter.all("/api", (req, res) => res.send("handler-body"));
+
+      await adapter.listen(0);
+      const base = baseUrl();
+
+      await fetch(`${base}/api`);
+      await fetch(`${base}/api`, { method: "POST" });
+
+      expect(order).toEqual(["mw:GET", "mw:POST"]);
+    });
+  });
+
+  describe("Bun.serve error callback", () => {
+    /**
+     * Force an error all the way out of `handleRequest`: the route throws, the
+     * custom error handler throws while reporting it, and the top-level catch
+     * calls that same handler again. Nothing is left to catch the second throw.
+     */
+    const mountEscapingError = (): void => {
+      adapter.setErrorHandler(() => {
+        throw new Error("error handler exploded");
+      });
+      adapter.get("/boom", () => {
+        throw new Error("original failure");
+      });
+    };
+
+    it("should answer with the adapter's JSON 500 rather than Bun's HTML error page", async () => {
+      mountEscapingError();
+
+      await adapter.listen(0);
+      const response = await fetch(`${baseUrl()}/boom`);
+
+      expect(response.status).toBe(500);
+      expect(response.headers.get("content-type")).toContain("application/json");
+      expect(await response.json()).toEqual({
+        statusCode: 500,
+        message: "Internal Server Error",
+      });
+    });
+
+    it("should emit on the server wrapper when an error listener is attached", async () => {
+      // EventEmitter throws on emit("error") with no listener, and that throw
+      // would escape into Bun's own handler and replace the JSON 500 above.
+      const observed: Error[] = [];
+      adapter.getHttpServer().on("error", (error: Error) => {
+        observed.push(error);
+      });
+      mountEscapingError();
+
+      await adapter.listen(0);
+      const response = await fetch(`${baseUrl()}/boom`);
+
+      expect(response.status).toBe(500);
+      expect(observed).toHaveLength(1);
+      expect(observed[0]?.message).toBe("error handler exploded");
     });
   });
 });

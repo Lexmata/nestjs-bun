@@ -1,0 +1,24 @@
+{
+  // Typecheck config for the e2e suite under test/.
+  //
+  // WHY THIS IS A SEPARATE FILE
+  //
+  // The root tsconfig.json includes only "src/**/*", so `pnpm typecheck` never
+  // looked at test/ at all - roughly 2,250 lines of e2e that, until recently,
+  // also never executed (the suite was run under vitest, where every Bun-gated
+  // block skipped while vitest still exited 0). Two independent gates were
+  // both reporting green on code neither of them was reading.
+  //
+  // Adding "test/**/*" to the root include surfaces 48 real type errors, all of
+  // them in test/e2e/. They are genuine findings, not config noise - mostly
+  // `unknown` bodies from the 0.2.0 lazy-body change (TS18046) and untyped
+  // Express middleware parameters (TS7006). Folding them into the root config
+  // would turn `pnpm typecheck` red for everyone until they are fixed, so they
+  // get their own gate instead: the main gate keeps guarding src/, this one
+  // tracks test/, and neither hides the other.
+  //
+  // When test/e2e/ is clean, delete this file and add "test/**/*" to the
+  // root config's `include` instead. One gate is better than two.
+  "extends": "./tsconfig.json",
+  "include": ["src/**/*", "test/**/*"]
+}

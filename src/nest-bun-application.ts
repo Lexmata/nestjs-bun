@@ -12,16 +12,20 @@ export class NestBunFactory {
    * Create a new NestJS application using Bun as the HTTP server
    *
    * @param module - The root module of the application
-   * @param options - Optional configuration options
+   * @param options - Optional configuration options. `serverOptions` is passed
+   *   through to `Bun.serve()`, so TLS, unix sockets and body-size limits are
+   *   configured there.
    * @returns A NestJS application configured for Bun
    *
    * @example
    * ```typescript
-   * import { NestBunFactory } from '@pegasusheavy/nestjs-platform-bun';
+   * import { NestBunFactory } from '@lexmata/nestjs-platform-bun';
    * import { AppModule } from './app.module';
    *
    * async function bootstrap() {
-   *   const app = await NestBunFactory.create(AppModule);
+   *   const app = await NestBunFactory.create(AppModule, {
+   *     serverOptions: { maxRequestBodySize: 10 * 1024 * 1024 },
+   *   });
    *   await app.listen(3000);
    *   console.log('Application is running on: http://localhost:3000');
    * }
@@ -33,11 +37,13 @@ export class NestBunFactory {
     module: Type<unknown>,
     options?: NestBunApplicationOptions
   ): Promise<T> {
-    const adapter = new BunAdapter();
+    const adapter = new BunAdapter(undefined, options?.serverOptions);
 
     const app = await NestFactory.create(module, adapter, {
       ...options,
-      // Disable body parser since Bun handles it natively
+      // Bun parses request bodies natively in the adapter, so NestJS's own
+      // parser middleware is redundant. `NestBunApplicationOptions` omits
+      // `bodyParser` for this reason - it is not a user-settable option.
       bodyParser: false,
     });
 
@@ -45,7 +51,11 @@ export class NestBunFactory {
   }
 
   /**
-   * Create a new NestJS application with an existing Bun server instance
+   * Create a new NestJS application that serves through an existing Bun server.
+   *
+   * The supplied server is re-pointed at this application's request handler via
+   * `server.reload()`, and `app.listen()` becomes a no-op for it - the server is
+   * already listening on whatever port it was created with.
    *
    * @param module - The root module of the application
    * @param server - An existing Bun server instance
@@ -57,7 +67,7 @@ export class NestBunFactory {
     server: Server<unknown>,
     options?: NestBunApplicationOptions
   ): Promise<T> {
-    const adapter = new BunAdapter(server);
+    const adapter = new BunAdapter(server, options?.serverOptions);
 
     const app = await NestFactory.create(module, adapter, {
       ...options,

@@ -1,5 +1,6 @@
 import { Component } from '@angular/core';
 import { CommonModule } from '@angular/common';
+import { repoTree } from '../site';
 
 @Component({
   selector: 'app-examples',
@@ -9,7 +10,7 @@ import { CommonModule } from '@angular/common';
     <article class="max-w-4xl mx-auto px-6 py-12 animate-fade-in">
       <h1 class="text-4xl font-bold mb-4">Examples</h1>
       <p class="text-text-secondary text-lg mb-8">
-        Real-world examples to help you get started with @pegasusheavy/nestjs-platform-bun.
+        Real-world examples to help you get started with @lexmata/nestjs-platform-bun.
       </p>
 
       <!-- Basic REST API -->
@@ -88,7 +89,7 @@ import { CommonModule } from '@angular/common';
             <span class="text-text-muted text-sm">main.ts</span>
           </div>
           <pre class="p-4 overflow-x-auto"><code class="text-sm"><span class="token-keyword">import</span> <span class="token-string">'reflect-metadata'</span>;
-<span class="token-keyword">import</span> &#123; NestBunFactory &#125; <span class="token-keyword">from</span> <span class="token-string">'@pegasusheavy/nestjs-platform-bun'</span>;
+<span class="token-keyword">import</span> &#123; NestBunFactory &#125; <span class="token-keyword">from</span> <span class="token-string">'@lexmata/nestjs-platform-bun'</span>;
 <span class="token-keyword">import</span> &#123; AppModule &#125; <span class="token-keyword">from</span> <span class="token-string">'./app.module'</span>;
 
 <span class="token-comment">// Simple auth middleware</span>
@@ -129,33 +130,40 @@ import { CommonModule } from '@angular/common';
           <div class="flex items-center px-4 py-2 bg-bg-secondary border-b border-border">
             <span class="text-text-muted text-sm">upload.controller.ts</span>
           </div>
-          <pre class="p-4 overflow-x-auto"><code class="text-sm"><span class="token-keyword">import</span> &#123; Controller, Post, Req &#125; <span class="token-keyword">from</span> <span class="token-string">'&#64;nestjs/common'</span>;
+          <pre class="p-4 overflow-x-auto"><code class="text-sm"><span class="token-keyword">import</span> &#123; Controller, Post, Body &#125; <span class="token-keyword">from</span> <span class="token-string">'&#64;nestjs/common'</span>;
 
 &#64;<span class="token-function">Controller</span>(<span class="token-string">'upload'</span>)
 <span class="token-keyword">export class</span> <span class="token-variable">UploadController</span> &#123;
   &#64;<span class="token-function">Post</span>()
-  <span class="token-keyword">async</span> <span class="token-function">uploadFile</span>(&#64;<span class="token-function">Req</span>() req) &#123;
-    <span class="token-comment">// Access the raw request body as FormData</span>
-    <span class="token-keyword">const</span> formData = req.body;
-    <span class="token-keyword">const</span> file = formData.<span class="token-function">get</span>(<span class="token-string">'file'</span>);
+  <span class="token-keyword">async</span> <span class="token-function">uploadFile</span>(&#64;<span class="token-function">Body</span>() body: <span class="token-variable">Record</span>&#60;<span class="token-variable">string</span>, <span class="token-variable">unknown</span>&#62;) &#123;
+    <span class="token-comment">// multipart/form-data is parsed into a PLAIN OBJECT keyed by field</span>
+    <span class="token-comment">// name — it is not a FormData, so use body.file, not body.get('file').</span>
+    <span class="token-keyword">const</span> file = body.file;
 
-    <span class="token-keyword">if</span> (file <span class="token-keyword">instanceof</span> File) &#123;
-      <span class="token-comment">// Save file using Bun's file API</span>
-      <span class="token-keyword">await</span> Bun.<span class="token-function">write</span>(
-        <span class="token-string">\`./uploads/\$&#123;file.name&#125;\`</span>,
-        file
-      );
-
-      <span class="token-keyword">return</span> &#123;
-        filename: file.name,
-        size: file.size,
-        type: file.type
-      &#125;;
+    <span class="token-keyword">if</span> (!(file <span class="token-keyword">instanceof</span> File)) &#123;
+      <span class="token-keyword">return</span> &#123; error: <span class="token-string">'No file uploaded'</span> &#125;;
     &#125;
 
-    <span class="token-keyword">return</span> &#123; error: <span class="token-string">'No file uploaded'</span> &#125;;
+    <span class="token-comment">// Save the file using Bun's file API</span>
+    <span class="token-keyword">await</span> Bun.<span class="token-function">write</span>(<span class="token-string">\`./uploads/\$&#123;file.name&#125;\`</span>, file);
+
+    <span class="token-keyword">return</span> &#123;
+      filename: file.name,
+      size: file.size,
+      type: file.type
+    &#125;;
   &#125;
 &#125;</code></pre>
+        </div>
+
+        <div class="p-4 mt-4 bg-yellow-500/10 border border-yellow-500/20 rounded-lg">
+          <p class="text-text-primary text-sm">
+            <strong>⚠ Repeated field names collapse.</strong>
+            The parser assigns each field into a plain object, so a form posting
+            <code>file</code> more than once keeps only the last one. Read
+            <code>req.raw.formData()</code> yourself when you need multi-file uploads —
+            <code>req.raw</code> is the underlying Bun <code>Request</code>.
+          </p>
         </div>
       </section>
 
@@ -167,7 +175,7 @@ import { CommonModule } from '@angular/common';
         </p>
 
         <div class="bg-bg-code rounded-lg border border-border overflow-hidden">
-          <pre class="p-4 overflow-x-auto"><code class="text-sm"><span class="token-keyword">import</span> &#123; NestBunFactory &#125; <span class="token-keyword">from</span> <span class="token-string">'@pegasusheavy/nestjs-platform-bun'</span>;
+          <pre class="p-4 overflow-x-auto"><code class="text-sm"><span class="token-keyword">import</span> &#123; NestBunFactory &#125; <span class="token-keyword">from</span> <span class="token-string">'@lexmata/nestjs-platform-bun'</span>;
 
 <span class="token-keyword">async function</span> <span class="token-function">bootstrap</span>() &#123;
   <span class="token-keyword">const</span> app = <span class="token-keyword">await</span> NestBunFactory.<span class="token-function">create</span>(AppModule);
@@ -190,9 +198,12 @@ import { CommonModule } from '@angular/common';
 
       <!-- More Examples -->
       <section class="p-6 bg-bg-secondary rounded-xl border border-border">
-        <h2 class="text-xl font-bold mb-4">More Examples</h2>
+        <h2 class="text-xl font-bold mb-4">Runnable Sample Apps</h2>
         <p class="text-text-secondary mb-4">
-          Find more examples in our GitHub repository:
+          The <code>examples/</code> directory is a single Bun workspace — one
+          <code>pnpm install</code> covers all five. Each depends on the package by name
+          (<code>file:..</code>), so they run against the built artifact you would install
+          from npm:
         </p>
         <div class="space-y-3">
           @for (example of examples; track example.title) {
@@ -221,19 +232,34 @@ import { CommonModule } from '@angular/common';
 export class ExamplesComponent {
   examples = [
     {
-      title: 'GraphQL API',
-      description: 'Using Apollo Server with @pegasusheavy/nestjs-platform-bun',
-      link: 'https://github.com/PegasusHeavyIndustries/nestjs-bun/tree/main/examples/graphql',
+      title: 'examples/01-basic',
+      description:
+        'NestBunFactory bootstrap: @Get, @Post, a @Param() route and a @Header() response — pnpm start:basic',
+      link: repoTree('examples/01-basic'),
     },
     {
-      title: 'Database Integration',
-      description: 'Prisma ORM with SQLite',
-      link: 'https://github.com/PegasusHeavyIndustries/nestjs-bun/tree/main/examples/prisma',
+      title: 'examples/02-express-middleware',
+      description:
+        'Express middleware on the Bun server: synchronous, asynchronous next(), path-scoped and 4-argument error middleware — pnpm start:express-middleware',
+      link: repoTree('examples/02-express-middleware'),
     },
     {
-      title: 'Full Stack App',
-      description: 'React frontend with @pegasusheavy/nestjs-platform-bun API',
-      link: 'https://github.com/PegasusHeavyIndustries/nestjs-bun/tree/main/examples/fullstack',
+      title: 'examples/03-fastify-hooks',
+      description:
+        'All seven supported Fastify hooks registered through a plugin, with onSend rewriting the response payload — pnpm start:fastify-hooks',
+      link: repoTree('examples/03-fastify-hooks'),
+    },
+    {
+      title: 'examples/04-tls',
+      description:
+        'HTTPS via serverOptions.tls passed through to Bun.serve, with a script to generate a local certificate — pnpm start:tls',
+      link: repoTree('examples/04-tls'),
+    },
+    {
+      title: 'examples/05-raw-body-webhook',
+      description:
+        'rawBody: true and HMAC signature verification over the exact request bytes — pnpm start:webhook',
+      link: repoTree('examples/05-raw-body-webhook'),
     },
   ];
 }

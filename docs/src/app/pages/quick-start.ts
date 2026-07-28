@@ -34,7 +34,7 @@ mkdir my-bun-api && cd my-bun-api
 pnpm init
 
 <span class="text-text-muted"># Install dependencies</span>
-pnpm add @pegasusheavy/nestjs-platform-bun &#64;nestjs/common &#64;nestjs/core reflect-metadata rxjs</code></pre>
+pnpm add @lexmata/nestjs-platform-bun &#64;nestjs/common &#64;nestjs/core reflect-metadata rxjs</code></pre>
           </div>
         </section>
 
@@ -86,7 +86,7 @@ pnpm add @pegasusheavy/nestjs-platform-bun &#64;nestjs/common &#64;nestjs/core r
   &#64;<span class="token-function">Get</span>()
   <span class="token-function">hello</span>() &#123;
     <span class="token-keyword">return</span> &#123;
-      message: <span class="token-string">'Welcome to @pegasusheavy/nestjs-platform-bun!'</span>,
+      message: <span class="token-string">'Welcome to @lexmata/nestjs-platform-bun!'</span>,
       timestamp: <span class="token-keyword">new</span> <span class="token-function">Date</span>().<span class="token-function">toISOString</span>()
     &#125;;
   &#125;
@@ -120,7 +120,7 @@ pnpm add @pegasusheavy/nestjs-platform-bun &#64;nestjs/common &#64;nestjs/core r
               <span class="text-text-muted text-sm">main.ts</span>
             </div>
             <pre class="p-4 overflow-x-auto"><code class="text-sm"><span class="token-keyword">import</span> <span class="token-string">'reflect-metadata'</span>;
-<span class="token-keyword">import</span> &#123; NestBunFactory &#125; <span class="token-keyword">from</span> <span class="token-string">'@pegasusheavy/nestjs-platform-bun'</span>;
+<span class="token-keyword">import</span> &#123; NestBunFactory &#125; <span class="token-keyword">from</span> <span class="token-string">'@lexmata/nestjs-platform-bun'</span>;
 <span class="token-keyword">import</span> &#123; AppModule &#125; <span class="token-keyword">from</span> <span class="token-string">'./app.module'</span>;
 
 <span class="token-keyword">async function</span> <span class="token-function">bootstrap</span>() &#123;

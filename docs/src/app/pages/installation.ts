@@ -1,15 +1,16 @@
 import { Component } from '@angular/core';
 import { CommonModule } from '@angular/common';
+import { RouterLink } from '@angular/router';
 
 @Component({
   selector: 'app-installation',
   standalone: true,
-  imports: [CommonModule],
+  imports: [CommonModule, RouterLink],
   template: `
     <article class="max-w-4xl mx-auto px-6 py-12 animate-fade-in">
       <h1 class="text-4xl font-bold mb-4">Installation</h1>
       <p class="text-text-secondary text-lg mb-8">
-        Get started with @pegasusheavy/nestjs-platform-bun in just a few steps.
+        Get started with @lexmata/nestjs-platform-bun in just a few steps.
       </p>
 
       <!-- Prerequisites -->
@@ -23,10 +24,12 @@ import { CommonModule } from '@angular/common';
               <span class="text-2xl">🥟</span>
             </div>
             <div>
-              <h3 class="font-semibold text-text-primary">Bun v1.0+</h3>
+              <h3 class="font-semibold text-text-primary">Bun v1.0+ — required</h3>
               <p class="text-text-secondary text-sm mt-1">
-                The Bun runtime is required to run this adapter.
-                <a href="https://bun.sh" target="_blank" class="text-nest-red hover:underline ml-1">Install Bun →</a>
+                This adapter calls <code>Bun.serve()</code> and <code>Bun.file()</code> directly
+                and has no Node.js fallback. Your application must be started with
+                <code>bun run</code>; running it under <code>node</code> will fail.
+                <a href="https://bun.sh" target="_blank" rel="noopener" class="text-nest-red hover:underline ml-1">Install Bun →</a>
               </p>
             </div>
           </div>
@@ -50,7 +53,10 @@ import { CommonModule } from '@angular/common';
       <!-- Installation -->
       <section class="mb-12">
         <h2 class="text-2xl font-bold mb-4">Install the Package</h2>
-        <p class="text-text-secondary mb-4">Install using your preferred package manager:</p>
+        <p class="text-text-secondary mb-4">
+          Install with whichever package manager you use — only the <em>runtime</em> has to be
+          Bun:
+        </p>
 
         <div class="space-y-4">
           @for (pkg of packageManagers; track pkg.name) {
@@ -132,7 +138,7 @@ import { CommonModule } from '@angular/common';
           <div class="flex items-center px-4 py-2 bg-bg-secondary border-b border-border">
             <span class="text-text-muted text-sm">test.ts</span>
           </div>
-          <pre class="p-4 overflow-x-auto"><code class="text-sm"><span class="token-keyword">import</span> &#123; NestBunFactory &#125; <span class="token-keyword">from</span> <span class="token-string">'@pegasusheavy/nestjs-platform-bun'</span>;
+          <pre class="p-4 overflow-x-auto"><code class="text-sm"><span class="token-keyword">import</span> &#123; NestBunFactory &#125; <span class="token-keyword">from</span> <span class="token-string">'@lexmata/nestjs-platform-bun'</span>;
 <span class="token-keyword">import</span> &#123; Module, Controller, Get &#125; <span class="token-keyword">from</span> <span class="token-string">'&#64;nestjs/common'</span>;
 
 &#64;<span class="token-function">Controller</span>()
@@ -199,10 +205,10 @@ import { CommonModule } from '@angular/common';
 })
 export class InstallationComponent {
   packageManagers = [
-    { name: 'pnpm (recommended)', command: 'pnpm add @pegasusheavy/nestjs-platform-bun' },
-    { name: 'npm', command: 'npm install @pegasusheavy/nestjs-platform-bun' },
-    { name: 'yarn', command: 'yarn add @pegasusheavy/nestjs-platform-bun' },
-    { name: 'bun', command: 'bun add @pegasusheavy/nestjs-platform-bun' }
+    { name: 'pnpm (recommended)', command: 'pnpm add @lexmata/nestjs-platform-bun' },
+    { name: 'npm', command: 'npm install @lexmata/nestjs-platform-bun' },
+    { name: 'yarn', command: 'yarn add @lexmata/nestjs-platform-bun' },
+    { name: 'bun', command: 'bun add @lexmata/nestjs-platform-bun' }
   ];
 
   copyCommand(command: string) {

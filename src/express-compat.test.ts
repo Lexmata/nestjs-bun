@@ -1,4 +1,5 @@
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, vi } from "vitest";
+import { Logger } from "@nestjs/common";
 import { createExpressRequest, createExpressResponse } from "./express-compat";
 
 describe("createExpressRequest", () => {
@@ -87,30 +88,58 @@ describe("createExpressRequest", () => {
     expect(req.cookies.token).toBe("abc=def=ghi");
   });
 
-  it("should get IP from x-forwarded-for", () => {
+  it("should get IP from x-forwarded-for when proxy is trusted", () => {
     const bunRequest = new Request("http://localhost", {
       headers: { "X-Forwarded-For": "192.168.1.1, 10.0.0.1" },
     });
-    const req = createExpressRequest(bunRequest);
+    const req = createExpressRequest(bunRequest, {}, true);
 
     expect(req.ip).toBe("192.168.1.1");
     expect(req.ips).toEqual(["192.168.1.1", "10.0.0.1"]);
   });
 
-  it("should get IP from x-real-ip", () => {
+  it("should ignore x-forwarded-for when proxy is not trusted", () => {
+    const bunRequest = new Request("http://localhost", {
+      headers: { "X-Forwarded-For": "192.168.1.1, 10.0.0.1" },
+    });
+    const req = createExpressRequest(bunRequest);
+
+    expect(req.ip).toBe("");
+    expect(req.ips).toEqual([]);
+  });
+
+  it("should use the peer address when the proxy is not trusted", () => {
+    const bunRequest = new Request("http://localhost", {
+      headers: { "X-Forwarded-For": "192.168.1.1" },
+    });
+    const req = createExpressRequest(bunRequest, {}, false, "203.0.113.9");
+
+    expect(req.ip).toBe("203.0.113.9");
+    expect(req.ips).toEqual([]);
+  });
+
+  it("should get IP from x-real-ip when proxy is trusted", () => {
     const bunRequest = new Request("http://localhost", {
       headers: { "X-Real-IP": "10.0.0.1" },
     });
-    const req = createExpressRequest(bunRequest);
+    const req = createExpressRequest(bunRequest, {}, true);
 
     expect(req.ip).toBe("10.0.0.1");
   });
 
-  it("should default IP to 127.0.0.1", () => {
+  it("should not fabricate a localhost IP when nothing is known", () => {
     const bunRequest = new Request("http://localhost");
     const req = createExpressRequest(bunRequest);
 
-    expect(req.ip).toBe("127.0.0.1");
+    expect(req.ip).toBe("");
+    expect(req.ips).toEqual([]);
+  });
+
+  it("should fall back to the peer address when trusting an empty proxy chain", () => {
+    const bunRequest = new Request("http://localhost");
+    const req = createExpressRequest(bunRequest, {}, true, "203.0.113.9");
+
+    expect(req.ip).toBe("203.0.113.9");
   });
 
   it("should parse subdomains", () => {
@@ -118,6 +147,83 @@ describe("createExpressRequest", () => {
     const req = createExpressRequest(bunRequest);
 
     expect(req.subdomains).toEqual(["v1", "api"]);
+  });
+
+  it("should prefer x-forwarded-proto when the proxy is trusted", () => {
+    const bunRequest = new Request("http://localhost/path", {
+      headers: { "X-Forwarded-Proto": "https" },
+    });
+    const req = createExpressRequest(bunRequest, {}, true);
+
+    expect(req.protocol).toBe("https");
+    expect(req.secure).toBe(true);
+  });
+
+  it("should ignore x-forwarded-proto when the proxy is not trusted", () => {
+    const bunRequest = new Request("http://localhost/path", {
+      headers: { "X-Forwarded-Proto": "https" },
+    });
+    const req = createExpressRequest(bunRequest);
+
+    expect(req.protocol).toBe("http");
+    expect(req.secure).toBe(false);
+  });
+
+  it("should prefer x-forwarded-host when the proxy is trusted", () => {
+    const bunRequest = new Request("http://localhost/path", {
+      headers: { "X-Forwarded-Host": "api.v1.example.com" },
+    });
+    const req = createExpressRequest(bunRequest, {}, true);
+
+    expect(req.hostname).toBe("api.v1.example.com");
+    expect(req.subdomains).toEqual(["v1", "api"]);
+  });
+
+  it("should collect repeated query keys into an array", () => {
+    const bunRequest = new Request("http://localhost/path?a=1&a=2&b=3");
+    const req = createExpressRequest(bunRequest);
+
+    expect(req.query).toEqual({ a: ["1", "2"], b: "3" });
+  });
+
+  it("should decode percent-encoded cookie values", () => {
+    const bunRequest = new Request("http://localhost", {
+      headers: { Cookie: "redirect=%2Fdash%3Fa%3D1; name=John%20Doe" },
+    });
+    const req = createExpressRequest(bunRequest);
+
+    expect(req.cookies.redirect).toBe("/dash?a=1");
+    expect(req.cookies.name).toBe("John Doe");
+  });
+
+  it("should fall back to the raw value on malformed cookie escapes", () => {
+    const bunRequest = new Request("http://localhost", {
+      headers: { Cookie: "broken=%E0%A4%A" },
+    });
+    const req = createExpressRequest(bunRequest);
+
+    expect(req.cookies.broken).toBe("%E0%A4%A");
+  });
+
+  it("should skip valueless cookies", () => {
+    const bunRequest = new Request("http://localhost", {
+      headers: { Cookie: "flag; real=1" },
+    });
+    const req = createExpressRequest(bunRequest);
+
+    expect(req.cookies).toEqual({ real: "1" });
+  });
+
+  it("should round-trip a cookie set by res.cookie", () => {
+    const res = createExpressResponse();
+    res.cookie("redirect", "/dash?a=1");
+
+    const bunRequest = new Request("http://localhost", {
+      headers: { Cookie: res._headers.get("Set-Cookie") as string },
+    });
+    const req = createExpressRequest(bunRequest);
+
+    expect(req.cookies.redirect).toBe("/dash?a=1");
   });
 
   it("should detect XHR requests", () => {
@@ -195,6 +301,16 @@ describe("createExpressRequest", () => {
 
       expect(req.accepts("application/json")).toBe("application/json");
     });
+
+    it("should return the caller's first match, in caller order", () => {
+      // The shim does not rank by q-value: it is a substring probe over the header
+      const bunRequest = new Request("http://localhost", {
+        headers: { Accept: "text/html;q=0.4, application/json;q=0.9" },
+      });
+      const req = createExpressRequest(bunRequest);
+
+      expect(req.accepts("text/html", "application/json")).toBe("text/html");
+    });
   });
 
   describe("acceptsCharsets method", () => {
@@ -244,6 +360,7 @@ describe("createExpressRequest", () => {
 
       expect(req.acceptsEncodings("br")).toBe(false);
     });
+
   });
 
   describe("acceptsLanguages method", () => {
@@ -264,34 +381,45 @@ describe("createExpressRequest", () => {
 
       expect(req.acceptsLanguages("fr")).toBe(false);
     });
+
   });
 
   describe("is method", () => {
-    it("should return type if content-type matches", () => {
-      const bunRequest = new Request("http://localhost", {
-        headers: { "Content-Type": "application/json" },
+    const bodyRequest = (contentType: string) =>
+      new Request("http://localhost", {
+        method: "POST",
+        headers: { "Content-Type": contentType },
+        body: "payload",
       });
-      const req = createExpressRequest(bunRequest);
+
+    it("should return type if content-type matches", () => {
+      const req = createExpressRequest(bodyRequest("application/json"));
 
       expect(req.is("json")).toBe("json");
       expect(req.is("application/json")).toBe("application/json");
     });
 
+    it("should ignore content-type parameters", () => {
+      const req = createExpressRequest(bodyRequest("application/json; charset=utf-8"));
+
+      expect(req.is("json")).toBe("json");
+    });
+
     it("should return false if content-type does not match", () => {
-      const bunRequest = new Request("http://localhost", {
-        headers: { "Content-Type": "text/html" },
-      });
-      const req = createExpressRequest(bunRequest);
+      const req = createExpressRequest(bodyRequest("text/html"));
 
       expect(req.is("json")).toBe(false);
     });
 
     it("should return null if no content-type", () => {
-      const bunRequest = new Request("http://localhost");
+      const bunRequest = new Request("http://localhost", { method: "POST", body: "payload" });
       const req = createExpressRequest(bunRequest);
+      // Bun infers text/plain for a string body, so strip it explicitly
+      bunRequest.headers.delete("content-type");
 
       expect(req.is("json")).toBeNull();
     });
+
   });
 
   describe("range method", () => {
@@ -302,14 +430,71 @@ describe("createExpressRequest", () => {
       expect(req.range(1000)).toBeUndefined();
     });
 
-    it("should return undefined for range header (simplified impl)", () => {
+    it("should return undefined even when a range header is present", () => {
+      // Range parsing is intentionally not implemented by this shim
       const bunRequest = new Request("http://localhost", {
         headers: { Range: "bytes=0-100" },
       });
       const req = createExpressRequest(bunRequest);
 
-      // Simplified implementation returns undefined
       expect(req.range(1000)).toBeUndefined();
+      expect(req.range(1000, { combine: true })).toBeUndefined();
+    });
+  });
+
+  describe("mutable properties", () => {
+    // Middleware routinely overwrites these (proxies rewrite hostname/protocol,
+    // body parsers replace query/cookies/headers), so the setters must stick.
+    it("should let middleware overwrite hostname and reset subdomains", () => {
+      const req = createExpressRequest(new Request("http://api.v1.example.com/path"));
+      expect(req.subdomains).toEqual(["v1", "api"]);
+
+      req.hostname = "www.other.com";
+
+      expect(req.hostname).toBe("www.other.com");
+      expect(req.subdomains).toEqual(["www"]);
+    });
+
+    it("should let middleware overwrite the connection properties", () => {
+      const req = createExpressRequest(new Request("http://localhost/path"));
+
+      req.ip = "203.0.113.1";
+      req.ips = ["203.0.113.1", "10.0.0.1"];
+      req.protocol = "https";
+      req.subdomains = ["forced"];
+
+      expect(req.ip).toBe("203.0.113.1");
+      expect(req.ips).toEqual(["203.0.113.1", "10.0.0.1"]);
+      expect(req.protocol).toBe("https");
+      expect(req.secure).toBe(true);
+      expect(req.subdomains).toEqual(["forced"]);
+
+      req.secure = false;
+      expect(req.protocol).toBe("http");
+    });
+
+    it("should let middleware replace query, cookies and headers", () => {
+      const req = createExpressRequest(new Request("http://localhost/path?a=1"));
+
+      req.query = { parsed: "yes" };
+      req.cookies = { session: "abc" };
+      req.headers = { "x-injected": "1" };
+
+      expect(req.query).toEqual({ parsed: "yes" });
+      expect(req.cookies).toEqual({ session: "abc" });
+      expect(req.headers).toEqual({ "x-injected": "1" });
+    });
+  });
+
+  describe("get method aliases", () => {
+    it("should alias referrer to referer", () => {
+      const bunRequest = new Request("http://localhost", {
+        headers: { Referer: "http://example.com" },
+      });
+      const req = createExpressRequest(bunRequest);
+
+      expect(req.get("referrer")).toBe("http://example.com");
+      expect(req.get("Referer")).toBe("http://example.com");
     });
   });
 });
@@ -345,6 +530,23 @@ describe("createExpressResponse", () => {
     });
   });
 
+  describe("internal state accessors", () => {
+    it("should keep _statusCode and statusCode in sync", () => {
+      const res = createExpressResponse();
+      res._statusCode = 418;
+
+      expect(res.statusCode).toBe(418);
+      expect(res._statusCode).toBe(418);
+    });
+
+    it("should allow headersSent to be forced", () => {
+      const res = createExpressResponse();
+      res.headersSent = true;
+
+      expect(res.headersSent).toBe(true);
+    });
+  });
+
   describe("statusMessage setter", () => {
     it("should set status message", () => {
       const res = createExpressResponse();
@@ -362,6 +564,18 @@ describe("createExpressResponse", () => {
       expect(res.statusCode).toBe(404);
       expect(res._body).toBe("Not Found");
       expect(res._ended).toBe(true);
+      expect(res._headers.get("Content-Type")).toBe("text/plain");
+      expect(res.statusMessage).toBe("Not Found");
+    });
+
+    it("should not assign a body for null-body statuses", () => {
+      const res = createExpressResponse();
+      res.sendStatus(204);
+
+      expect(res.statusCode).toBe(204);
+      expect(res._body).toBeNull();
+      expect(res._headers.get("Content-Type")).toBeNull();
+      expect(res._headers.get("Content-Length")).toBeNull();
     });
   });
 
@@ -374,6 +588,14 @@ describe("createExpressResponse", () => {
       expect(res._ended).toBe(true);
       expect(res._headers.get("Content-Type")).toBe("application/json");
     });
+
+    it("should not clobber a caller-set Content-Type", () => {
+      const res = createExpressResponse();
+      res.type("application/problem+json").json({ title: "Nope" });
+
+      expect(res._headers.get("Content-Type")).toBe("application/problem+json");
+      expect(res._body).toBe('{"title":"Nope"}');
+    });
   });
 
   describe("send method", () => {
@@ -383,6 +605,7 @@ describe("createExpressResponse", () => {
 
       expect(res._body).toBe("Hello");
       expect(res._headers.get("Content-Type")).toBe("text/html");
+      expect(res._headers.get("Content-Length")).toBe("5");
       expect(res._ended).toBe(true);
     });
 
@@ -393,6 +616,62 @@ describe("createExpressResponse", () => {
 
       expect(res._body).toBe(buffer);
       expect(res._headers.get("Content-Type")).toBe("application/octet-stream");
+    });
+
+    it("should send Uint8Array untouched", () => {
+      const res = createExpressResponse();
+      const data = new Uint8Array([1, 2, 3]);
+      res.send(data);
+
+      expect(res._body).toBe(data);
+      expect(res._headers.get("Content-Type")).toBe("application/octet-stream");
+    });
+
+    it("should send ArrayBuffer untouched", () => {
+      const res = createExpressResponse();
+      const data = new ArrayBuffer(4);
+      res.send(data);
+
+      expect(res._body).toBe(data);
+    });
+
+    it("should send a Blob untouched and round-trip its bytes", async () => {
+      const res = createExpressResponse();
+      const blob = new Blob(["blob payload"], { type: "text/plain" });
+      res.send(blob);
+
+      expect(res._body).toBe(blob);
+      expect(res._headers.get("Content-Type")).toContain("text/plain");
+
+      const response = res._buildResponse();
+      expect(await response.text()).toBe("blob payload");
+    });
+
+    it("should send a ReadableStream untouched", () => {
+      const res = createExpressResponse();
+      const stream = new ReadableStream();
+      res.send(stream);
+
+      expect(res._body).toBe(stream);
+    });
+
+    it("should send an empty body when called with no arguments", async () => {
+      const res = createExpressResponse();
+      res.send();
+
+      expect(res._body).toBeNull();
+      expect(res._headers.get("Content-Length")).toBe("0");
+
+      const response = res._buildResponse();
+      expect(await response.text()).toBe("");
+    });
+
+    it("should send an empty body for null", async () => {
+      const res = createExpressResponse();
+      res.send(null);
+
+      const response = res._buildResponse();
+      expect(await response.text()).toBe("");
     });
 
     it("should send object as JSON", () => {
@@ -408,6 +687,139 @@ describe("createExpressResponse", () => {
       res.send(123);
 
       expect(res._body).toBe("123");
+    });
+  });
+
+  describe("double send protection", () => {
+    it("should warn and no-op on a second send", () => {
+      const res = createExpressResponse();
+      const warnSpy = vi.spyOn(Logger.prototype, "warn").mockImplementation(() => {});
+
+      res.send("first");
+      res.send("second");
+
+      expect(res._body).toBe("first");
+      expect(warnSpy).toHaveBeenCalledWith(
+        "Cannot call res.send() after the response has already been sent"
+      );
+      warnSpy.mockRestore();
+    });
+
+    it("should set headersSent as soon as the body is sent", () => {
+      const res = createExpressResponse();
+
+      expect(res.headersSent).toBe(false);
+      res.json({ ok: true });
+      expect(res.headersSent).toBe(true);
+    });
+
+    it.each(["send", "json", "end", "sendStatus", "redirect"] as const)(
+      "should guard %s against a double send",
+      (method) => {
+        const res = createExpressResponse();
+        const warnSpy = vi.spyOn(Logger.prototype, "warn").mockImplementation(() => {});
+
+        res.send("original");
+        if (method === "sendStatus") res.sendStatus(500);
+        else if (method === "redirect") res.redirect("/elsewhere");
+        else if (method === "json") res.json({ nope: true });
+        else if (method === "end") res.end("nope");
+        else res.send("nope");
+
+        expect(res._body).toBe("original");
+        expect(res.statusCode).toBe(200);
+        expect(warnSpy).toHaveBeenCalled();
+        warnSpy.mockRestore();
+      }
+    );
+  });
+
+  describe("_onEnd notification", () => {
+    it.each(["send", "json", "end", "sendStatus", "redirect"] as const)(
+      "should fire when the response is ended via %s",
+      (method) => {
+        const res = createExpressResponse();
+        let fired = 0;
+        res._onEnd(() => {
+          fired++;
+        });
+
+        expect(fired).toBe(0);
+
+        if (method === "send") res.send("body");
+        else if (method === "json") res.json({ ok: true });
+        else if (method === "end") res.end();
+        else if (method === "sendStatus") res.sendStatus(204);
+        else res.redirect("/elsewhere");
+
+        expect(fired).toBe(1);
+      }
+    );
+
+    it("should fire when _ended is set out of band", () => {
+      const res = createExpressResponse();
+      let fired = 0;
+      res._onEnd(() => {
+        fired++;
+      });
+
+      res._ended = true;
+
+      expect(fired).toBe(1);
+    });
+
+    it("should invoke a listener immediately when registered after the response ended", () => {
+      const res = createExpressResponse();
+      res.send("done");
+
+      let fired = 0;
+      res._onEnd(() => {
+        fired++;
+      });
+
+      // Synchronous - not deferred to a later tick
+      expect(fired).toBe(1);
+    });
+
+    it("should fire exactly once even if the response is ended repeatedly", () => {
+      const res = createExpressResponse();
+      const warnSpy = vi.spyOn(Logger.prototype, "warn").mockImplementation(() => {});
+      let fired = 0;
+      res._onEnd(() => {
+        fired++;
+      });
+
+      res.send("first");
+      res.send("second");
+      res.end("third");
+      res._ended = true;
+
+      expect(fired).toBe(1);
+      warnSpy.mockRestore();
+    });
+
+    it("should invoke every registered listener in registration order", () => {
+      const res = createExpressResponse();
+      const order: string[] = [];
+      res._onEnd(() => order.push("first"));
+      res._onEnd(() => order.push("second"));
+      res._onEnd(() => order.push("third"));
+
+      res.json({ ok: true });
+
+      expect(order).toEqual(["first", "second", "third"]);
+    });
+
+    it("should not fire before the response is ended", () => {
+      const res = createExpressResponse();
+      let fired = 0;
+      res._onEnd(() => {
+        fired++;
+      });
+
+      res.status(201).set("X-Test", "1").type("json");
+
+      expect(fired).toBe(0);
     });
   });
 
@@ -487,10 +899,12 @@ describe("createExpressResponse", () => {
       expect(res.getHeader("X-Test")).toBe("value");
     });
 
-    it("should return null for missing header", () => {
+    it("should return undefined for missing header", () => {
       const res = createExpressResponse();
 
-      expect(res.get("X-Missing")).toBeNull();
+      // Express and Node return undefined, not null
+      expect(res.get("X-Missing")).toBeUndefined();
+      expect(res.getHeader("X-Missing")).toBeUndefined();
     });
   });
 
@@ -500,7 +914,7 @@ describe("createExpressResponse", () => {
       res.set("X-Test", "value");
       res.removeHeader("X-Test");
 
-      expect(res.get("X-Test")).toBeNull();
+      expect(res.get("X-Test")).toBeUndefined();
     });
   });
 
@@ -536,6 +950,20 @@ describe("createExpressResponse", () => {
       expect(res._headers.get("Content-Type")).toBe("application/xml");
     });
 
+    it("should strip a leading dot from an extension", () => {
+      const res = createExpressResponse();
+      res.type(".html");
+
+      expect(res._headers.get("Content-Type")).toBe("text/html");
+    });
+
+    it("should pass a full media type through untouched", () => {
+      const res = createExpressResponse();
+      res.type("text/plain;charset=iso-8859-1");
+
+      expect(res._headers.get("Content-Type")).toBe("text/plain;charset=iso-8859-1");
+    });
+
     it("should set content-type using contentType alias", () => {
       const res = createExpressResponse();
       res.contentType("html");
@@ -550,9 +978,16 @@ describe("createExpressResponse", () => {
       ["txt", "text/plain"],
       ["text", "text/plain"],
       ["css", "text/css"],
+      ["csv", "text/csv"],
+      ["md", "text/markdown"],
       ["js", "application/javascript"],
       ["json", "application/json"],
       ["xml", "application/xml"],
+      ["yaml", "application/yaml"],
+      ["yml", "application/yaml"],
+      ["wasm", "application/wasm"],
+      ["form", "application/x-www-form-urlencoded"],
+      ["urlencoded", "application/x-www-form-urlencoded"],
       ["png", "image/png"],
       ["jpg", "image/jpeg"],
       ["jpeg", "image/jpeg"],
@@ -560,6 +995,8 @@ describe("createExpressResponse", () => {
       ["svg", "image/svg+xml"],
       ["webp", "image/webp"],
       ["ico", "image/x-icon"],
+      ["woff2", "font/woff2"],
+      ["mp4", "video/mp4"],
       ["pdf", "application/pdf"],
       ["zip", "application/zip"],
       ["bin", "application/octet-stream"],
@@ -591,6 +1028,38 @@ describe("createExpressResponse", () => {
       // Should not throw
       res.format({});
     });
+
+    it("should ignore non-default handlers", () => {
+      // Accept negotiation is not implemented by this shim
+      const res = createExpressResponse(
+        new Request("http://localhost", { headers: { Accept: "text/html" } })
+      );
+      const called: string[] = [];
+
+      res.format({
+        html: () => called.push("html"),
+        default: () => called.push("default"),
+      });
+
+      expect(called).toEqual(["default"]);
+    });
+  });
+
+  describe("req association", () => {
+    it("should expose the originating request passed to the factory", () => {
+      const bunRequest = new Request("http://localhost");
+      const res = createExpressResponse(bunRequest);
+
+      expect(res.req).toBe(bunRequest);
+    });
+
+    it("should allow the request to be assigned afterwards", () => {
+      const res = createExpressResponse();
+      const req = createExpressRequest(new Request("http://localhost"));
+      res.req = req;
+
+      expect(res.req).toBe(req);
+    });
   });
 
   describe("attachment method", () => {
@@ -608,6 +1077,14 @@ describe("createExpressResponse", () => {
       expect(res._headers.get("Content-Disposition")).toBe('attachment; filename="file.pdf"');
       expect(res._headers.get("Content-Type")).toBe("application/pdf");
     });
+
+    it("should derive the content type from the extension", () => {
+      const res = createExpressResponse();
+      res.attachment("report.csv");
+
+      expect(res._headers.get("Content-Disposition")).toBe('attachment; filename="report.csv"');
+      expect(res._headers.get("Content-Type")).toBe("text/csv");
+    });
   });
 
   describe("cookie method", () => {
@@ -622,7 +1099,8 @@ describe("createExpressResponse", () => {
       const res = createExpressResponse();
       const expires = new Date("2025-01-01");
       res.cookie("name", "value", {
-        maxAge: 3600,
+        // Express maxAge is milliseconds
+        maxAge: 3600 * 1000,
         expires,
         path: "/",
         domain: ".example.com",
@@ -634,12 +1112,48 @@ describe("createExpressResponse", () => {
       const cookie = res._headers.get("Set-Cookie");
       expect(cookie).toContain("name=value");
       expect(cookie).toContain("Max-Age=3600");
-      expect(cookie).toContain("Expires=");
+      expect(cookie).toContain("Expires=Wed, 01 Jan 2025 00:00:00 GMT");
       expect(cookie).toContain("Path=/");
       expect(cookie).toContain("Domain=.example.com");
       expect(cookie).toContain("Secure");
       expect(cookie).toContain("HttpOnly");
       expect(cookie).toContain("SameSite=Strict");
+    });
+
+    it("should emit Max-Age in seconds from a millisecond maxAge", () => {
+      const res = createExpressResponse();
+      // The documented one-day sample
+      res.cookie("name", "value", { maxAge: 86400 * 1000 });
+
+      expect(res._headers.get("Set-Cookie")).toContain("Max-Age=86400");
+    });
+
+    it("should derive Expires from maxAge when not supplied", () => {
+      const res = createExpressResponse();
+      const before = Date.now();
+      res.cookie("name", "value", { maxAge: 60_000 });
+
+      const cookie = res._headers.get("Set-Cookie") as string;
+      const match = /Expires=([^;]+)/.exec(cookie);
+      expect(match).not.toBeNull();
+
+      const expires = new Date(match![1]!).getTime();
+      expect(expires).toBeGreaterThanOrEqual(before + 59_000);
+      expect(expires).toBeLessThanOrEqual(Date.now() + 61_000);
+    });
+
+    it("should encode the value with a custom encoder", () => {
+      const res = createExpressResponse();
+      res.cookie("name", "a b", { encode: (v) => v.replace(/ /g, "+") });
+
+      expect(res._headers.get("Set-Cookie")).toBe("name=a+b");
+    });
+
+    it("should URL-encode the value by default", () => {
+      const res = createExpressResponse();
+      res.cookie("redirect", "/dash?a=1");
+
+      expect(res._headers.get("Set-Cookie")).toBe("redirect=%2Fdash%3Fa%3D1");
     });
 
     it("should handle sameSite=true", () => {
@@ -691,6 +1205,44 @@ describe("createExpressResponse", () => {
       expect(res.statusCode).toBe(301);
       expect(res._headers.get("Location")).toBe("/new-path");
     });
+
+    it("should not mistake an empty URL for the status", () => {
+      const res = createExpressResponse();
+      res.redirect(302, "");
+
+      expect(res.statusCode).toBe(302);
+      expect(res._headers.get("Location")).toBe("");
+    });
+
+    it("should preserve a relative Location on the built response", () => {
+      const res = createExpressResponse();
+      res.redirect("/new-path");
+
+      const response = res._buildResponse();
+      expect(response.status).toBe(302);
+      expect(response.headers.get("Location")).toBe("/new-path");
+    });
+
+    it("should keep Set-Cookie across a redirect", () => {
+      const res = createExpressResponse();
+      res.cookie("session", "abc", { httpOnly: true });
+      res.redirect("/login");
+
+      const response = res._buildResponse();
+      expect(response.status).toBe(302);
+      expect(response.headers.get("Location")).toBe("/login");
+      expect(response.headers.get("Set-Cookie")).toContain("session=abc");
+    });
+
+    it("should build a 304 redirect without throwing", () => {
+      const res = createExpressResponse();
+      res.redirect(304, "/cached");
+
+      const response = res._buildResponse();
+      expect(response.status).toBe(304);
+      expect(response.headers.get("Location")).toBe("/cached");
+      expect(response.body).toBeNull();
+    });
   });
 
   describe("location method", () => {
@@ -714,6 +1266,14 @@ describe("createExpressResponse", () => {
       expect(link).toContain('</page/2>; rel="next"');
       expect(link).toContain('</page/1>; rel="prev"');
     });
+
+    it("should merge with an existing Link header", () => {
+      const res = createExpressResponse();
+      res.links({ next: "/page/2" });
+      res.links({ prev: "/page/1" });
+
+      expect(res._headers.get("Link")).toBe('</page/2>; rel="next", </page/1>; rel="prev"');
+    });
   });
 
   describe("vary method", () => {
@@ -730,6 +1290,39 @@ describe("createExpressResponse", () => {
       res.vary("Accept-Encoding");
 
       expect(res._headers.get("Vary")).toBe("Accept, Accept-Encoding");
+    });
+
+    it("should de-duplicate case-insensitively", () => {
+      const res = createExpressResponse();
+      res.vary("Accept");
+      res.vary("accept");
+      res.vary("ACCEPT-ENCODING");
+      res.vary("Accept-Encoding");
+
+      expect(res._headers.get("Vary")).toBe("Accept, ACCEPT-ENCODING");
+    });
+
+    it("should accept an array of fields", () => {
+      const res = createExpressResponse();
+      res.vary(["Accept", "Origin"]);
+
+      expect(res._headers.get("Vary")).toBe("Accept, Origin");
+    });
+
+    it("should short-circuit when Vary is *", () => {
+      const res = createExpressResponse();
+      res.vary("*");
+      res.vary("Accept");
+
+      expect(res._headers.get("Vary")).toBe("*");
+    });
+
+    it("should collapse to * when * is added", () => {
+      const res = createExpressResponse();
+      res.vary("Accept");
+      res.vary("*");
+
+      expect(res._headers.get("Vary")).toBe("*");
     });
   });
 
@@ -752,6 +1345,49 @@ describe("createExpressResponse", () => {
 
       const response = res._buildResponse();
       expect(response.status).toBe(301);
+      expect(response.headers.get("Location")).toBe("https://example.com/new-path");
+    });
+
+    it.each([101, 204, 205, 304])(
+      "should never carry a body on status %i",
+      (code) => {
+        const res = createExpressResponse();
+        res.status(code);
+        res._body = "should not be sent";
+        res._headers.set("Content-Type", "text/plain");
+        res._headers.set("Content-Length", "18");
+
+        const response = res._buildResponse();
+        expect(response.status).toBe(code);
+        expect(response.body).toBeNull();
+        expect(response.headers.get("Content-Type")).toBeNull();
+        expect(response.headers.get("Content-Length")).toBeNull();
+      }
+    );
+
+    it("should build a 204 after send() without throwing", async () => {
+      const res = createExpressResponse();
+      res.status(204).send("No Content");
+
+      const response = res._buildResponse();
+      expect(response.status).toBe(204);
+      expect(await response.text()).toBe("");
+    });
+
+    it("should derive statusText from the status code", () => {
+      const res = createExpressResponse();
+      res.status(404).send("nope");
+
+      expect(res.statusMessage).toBe("Not Found");
+      expect(res._buildResponse().statusText).toBe("Not Found");
+    });
+
+    it("should keep an explicitly assigned statusText", () => {
+      const res = createExpressResponse();
+      res.status(404);
+      res.statusMessage = "Nope";
+
+      expect(res._buildResponse().statusText).toBe("Nope");
     });
 
     it("should handle string body", async () => {
@@ -796,16 +1432,17 @@ describe("createExpressResponse", () => {
     it("should handle Blob body", async () => {
       const res = createExpressResponse();
       const blob = new Blob(["test"]);
-      // Use send which properly sets the internal body
+      // send() passes a Blob straight through instead of JSON-stringifying it
       res.send(blob);
 
       const response = res._buildResponse();
       expect(response).toBeInstanceOf(Response);
+      expect(await response.text()).toBe("test");
     });
 
-    it("should stringify non-primitive body types in send", async () => {
+    it("should JSON-serialise plain objects passed to send", async () => {
       const res = createExpressResponse();
-      // send() handles objects by JSON stringifying them
+      // send() delegates plain objects to json()
       res.send({ complex: "object" });
 
       const response = res._buildResponse();
@@ -829,17 +1466,32 @@ describe("createExpressResponse", () => {
     });
   });
 
+  // Null-body statuses never get a body, but they do get the right reason phrase
+  it.each([
+    [101, "Switching Protocols"],
+    [204, "No Content"],
+    [205, "Reset Content"],
+    [304, "Not Modified"],
+  ])("sendStatus %i should set the status text without a body", (code, expectedText) => {
+    const res = createExpressResponse();
+    res.sendStatus(code);
+
+    expect(res._body).toBeNull();
+    expect(res.statusMessage).toBe(expectedText);
+  });
+
   // Test status text mapping for coverage
   it.each([
     [100, "Continue"],
-    [101, "Switching Protocols"],
     [200, "OK"],
     [201, "Created"],
     [202, "Accepted"],
-    [204, "No Content"],
+    [206, "Partial Content"],
     [301, "Moved Permanently"],
     [302, "Found"],
-    [304, "Not Modified"],
+    [303, "See Other"],
+    [307, "Temporary Redirect"],
+    [308, "Permanent Redirect"],
     [400, "Bad Request"],
     [401, "Unauthorized"],
     [403, "Forbidden"],
@@ -847,8 +1499,10 @@ describe("createExpressResponse", () => {
     [405, "Method Not Allowed"],
     [409, "Conflict"],
     [410, "Gone"],
+    [418, "I'm a Teapot"],
     [422, "Unprocessable Entity"],
     [429, "Too Many Requests"],
+    [451, "Unavailable For Legal Reasons"],
     [500, "Internal Server Error"],
     [501, "Not Implemented"],
     [502, "Bad Gateway"],
