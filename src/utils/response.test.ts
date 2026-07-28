@@ -352,7 +352,18 @@ describe("error helper", () => {
     expect(body.error).toBe(expectedText);
   });
 
-  // Statuses 204/205/304 must not carry a body — error() emits an empty response.
+  // Statuses 101/204/205/304 must not carry a body — error() emits an empty response.
+  it("should return an empty body for 101", async () => {
+    // 101 was missing from this module's NULL_BODY_STATUSES while the three
+    // copies in the adapter and compat layers had it, so this returned a 101
+    // carrying the JSON error body. Bun's Response constructor permits that;
+    // the Fetch spec does not.
+    const res = error("switching protocols", 101);
+    expect(res.status).toBe(101);
+    expect(res.body).toBeNull();
+    expect(await res.text()).toBe("");
+  });
+
   it("should return an empty body for 204", async () => {
     const res = error("gone", 204);
     expect(res.status).toBe(204);

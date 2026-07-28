@@ -4,12 +4,13 @@
   "private": true,
   "description": "Benchmark suite for NestJS adapters",
   "scripts": {
-    "bench": "tsx run-benchmarks.ts",
-    "verify": "tsx verify-benchmarks.ts",
+    "build": "tsc -p tsconfig.build.json",
+    "bench": "pnpm build && node dist/run-benchmarks.js",
+    "verify": "pnpm build && node dist/verify-benchmarks.js",
     "typecheck": "tsc --noEmit",
-    "start:express": "tsx apps/express-app.ts",
-    "start:fastify": "tsx apps/fastify-app.ts",
-    "start:bun": "bun apps/bun-app.ts"
+    "start:express": "pnpm build && node dist/apps/express-app.js",
+    "start:fastify": "pnpm build && node dist/apps/fastify-app.js",
+    "start:bun": "pnpm build && bun dist/apps/bun-app.js"
   },
   "dependencies": {
     "@lexmata/nestjs-platform-bun": "file:..",
@@ -24,7 +25,6 @@
     "@types/autocannon": "^7.12.7",
     "@types/node": "^22.0.0",
     "autocannon": "^8.0.0",
-    "tsx": "^4.19.0",
     "typescript": "^5.7.3"
   }
 }

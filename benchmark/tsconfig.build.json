@@ -1,0 +1,27 @@
+{
+  // Emits the benchmark apps and harness as plain JavaScript so each runtime
+  // executes them directly — `node dist/apps/express-app.js`, `bun
+  // dist/apps/bun-app.js` — with no transpiler in the process.
+  //
+  // Running the Node apps under `tsx` made the comparison unfair in two ways:
+  // it kept an esbuild `module.register()` loader hook resident for the life of
+  // the process, which the natively-executed Bun app never paid; and esbuild
+  // does not implement `emitDecoratorMetadata`, so NestJS constructor injection
+  // silently resolved to `undefined` and had to be worked around with explicit
+  // `@Inject()`. `tsc` emits the metadata correctly, so the fixture no longer
+  // depends on that workaround.
+  //
+  // CommonJS on purpose: the sources use extensionless relative imports, which
+  // Node's ESM resolver rejects. CJS keeps the emitted code runnable by both
+  // runtimes without rewriting every import.
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "module": "CommonJS",
+    "moduleResolution": "node",
+    "noEmit": false,
+    "outDir": "dist",
+    "sourceMap": true
+  },
+  "include": ["apps/**/*.ts", "harness.ts", "run-benchmarks.ts", "verify-benchmarks.ts"],
+  "exclude": ["node_modules", "dist", "**/*.test.ts"]
+}

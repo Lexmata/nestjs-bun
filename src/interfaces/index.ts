@@ -56,17 +56,18 @@ export interface BunServerOptions {
    * only when the app sits behind a proxy you control.
    *
    * - `false` — headers are ignored entirely; only the socket address is used.
-   * - `true` — trust the whole chain and take the left-most (client-claimed)
-   *   entry of `X-Forwarded-For`. Any client on a direct connection can forge
-   *   this, so prefer a hop count.
-   * - `n` (a positive integer) — trust the last `n` entries as your own proxies
-   *   and take the `n`-th entry counting from the **right**, i.e. the address
-   *   the outermost trusted proxy actually saw. `1` selects the right-most
-   *   entry. This matches Express's numeric `trust proxy` semantics.
+   * - `true` — trust the chain and take the left-most (client-claimed) entry of
+   *   `X-Forwarded-For`.
+   *
+   * Express's numeric hop-count form is deliberately **not** accepted here. The
+   * compat layers implement boolean trust only, so a number could only be
+   * degraded to "trust the left-most entry" — which is precisely the spoofing a
+   * hop count exists to prevent. {@link getIp} does implement hop counts if you
+   * need one; call it directly with the count.
    *
    * This is an adapter-level option; it is not forwarded to `Bun.serve()`.
    */
-  trustProxy?: boolean | number;
+  trustProxy?: boolean;
 
   /**
    * How long, in milliseconds, a single Express middleware may run without

@@ -9,6 +9,10 @@ export default tseslint.config(
     // survived in the benchmark reporter.
     ignores: [
       "dist/**",
+      // Compiled benchmark apps. Generated CommonJS, gitignored, and run by
+      // node/bun directly so the benchmark measures neither runtime against a
+      // transpiler hook. Linting emitted code reports on tsc's output, not ours.
+      "benchmark/dist/**",
       "coverage/**",
       "node_modules/**",
       "**/node_modules/**",

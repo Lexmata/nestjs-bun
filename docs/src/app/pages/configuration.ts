@@ -214,18 +214,26 @@ interface OptionRow {
           </div>
         </div>
 
+        <div class="bg-bg-code rounded-lg border border-border p-4 overflow-x-auto mb-6">
+          <pre><code class="text-sm"><span class="token-comment">// A proxy you control sits in front and overwrites X-Forwarded-*.</span>
+<span class="token-keyword">const</span> app = <span class="token-keyword">await</span> NestBunFactory.<span class="token-function">create</span>(AppModule, &#123;
+  serverOptions: &#123; trustProxy: <span class="token-keyword">true</span> &#125;,
+&#125;);</code></pre>
+        </div>
+
         <p class="text-text-secondary mb-4">
-          Prefer the numeric form. It matches Express's numeric <code>trust proxy</code>
-          semantics: you state how many proxies of your own are in front of the app, and the
-          adapter counts in from the right — past exactly those hops — instead of believing the
-          left-most entry, which is the one the client wrote.
+          Express's numeric hop-count form is <strong>not</strong> accepted here. The compat
+          layers implement boolean trust only, so a number could only be degraded to "trust the
+          left-most entry" — which is exactly the spoofing a hop count exists to prevent. Reach
+          for <code>getIp()</code> when you need one: it takes the count and walks in from the
+          right, past exactly those hops.
         </p>
 
         <div class="bg-bg-code rounded-lg border border-border p-4 overflow-x-auto">
-          <pre><code class="text-sm"><span class="token-comment">// One proxy in front (an ALB, say) that appends the real client address.</span>
-<span class="token-keyword">const</span> app = <span class="token-keyword">await</span> NestBunFactory.<span class="token-function">create</span>(AppModule, &#123;
-  serverOptions: &#123; trustProxy: <span class="token-number">1</span> &#125;,
-&#125;);</code></pre>
+          <pre><code class="text-sm"><span class="token-keyword">import</span> &#123; getIp &#125; <span class="token-keyword">from</span> <span class="token-string">'&#64;lexmata/nestjs-platform-bun'</span>;
+
+<span class="token-comment">// One proxy in front (an ALB, say): take the right-most entry.</span>
+<span class="token-keyword">const</span> ip = <span class="token-function">getIp</span>(req.raw, &#123; trustProxy: <span class="token-number">1</span>, server &#125;);</code></pre>
         </div>
       </section>
 
@@ -388,7 +396,7 @@ export class ConfigurationComponent {
     { name: 'lowMemoryMode', type: 'boolean', default: "Bun's default", description: "Trade throughput for a smaller memory footprint in Bun's server." },
     {
       name: 'trustProxy',
-      type: 'boolean | number',
+      type: 'boolean',
       default: 'false',
       description:
         'Whether to honour X-Forwarded-For, X-Forwarded-Proto and X-Forwarded-Host when deriving req.ip, req.ips, req.protocol and req.hostname. These headers are supplied by the client, so enabling this means trusting what the caller sends. See the note below before turning it on. Adapter-level — not passed to Bun.serve().',
@@ -411,12 +419,7 @@ export class ConfigurationComponent {
     {
       value: 'true',
       behaviour:
-        'Trust the whole chain and take the left-most entry of X-Forwarded-For. That entry is whatever the original caller wrote, so any client on a direct connection can forge it. Prefer a hop count.',
-    },
-    {
-      value: 'n (a positive integer)',
-      behaviour:
-        'Trust the last n entries as your own proxies and take the n-th entry counting from the right — the address the outermost proxy you control actually saw. 1 selects the right-most entry. Matches Express\'s numeric trust proxy setting.',
+        'Trust the chain and take the left-most entry of X-Forwarded-For. That entry is whatever the original caller wrote, so only enable this behind a proxy that overwrites the header on every request.',
     },
   ];
 

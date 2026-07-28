@@ -79,7 +79,7 @@ bun run main.ts
 | `maxRequestBodySize` | `number` | yes |
 | `development` | `boolean` | yes |
 | `lowMemoryMode` | `boolean` | yes |
-| `trustProxy` | `boolean \| number` | **no** — adapter-level |
+| `trustProxy` | `boolean` | **no** — adapter-level |
 | `middlewareTimeout` | `number` | **no** — adapter-level |
 
 ```typescript
@@ -101,14 +101,22 @@ There is no `idleTimeout`, and no `port`/`hostname`: the listen address comes fr
 | Value | Behaviour |
 | --- | --- |
 | `false` (default) | Headers ignored entirely; socket address only. |
-| `true` | Trust the whole chain, take the **left-most** `X-Forwarded-For` entry. Forgeable — prefer a hop count. |
-| `n` (positive integer) | Trust the last `n` entries as your own proxies and take the `n`-th counting **from the right**. `1` selects the right-most entry. Matches Express's numeric `trust proxy`. |
+| `true` | Trust the chain and take the **left-most** `X-Forwarded-For` entry. |
 
 ```typescript
-// One proxy in front of the app (e.g. a single ALB):
+// Behind a proxy you control:
 const app = await NestBunFactory.create(AppModule, {
-  serverOptions: { trustProxy: 1 },
+  serverOptions: { trustProxy: true },
 });
+```
+
+Express's numeric hop-count form is **not** accepted. The compat layers implement boolean trust only, so a number could only be degraded to "trust the left-most entry" — exactly the spoofing a hop count exists to prevent. If you need a hop count, call [`getIp()`](#whats-exported) directly:
+
+```typescript
+import { getIp } from '@lexmata/nestjs-platform-bun';
+
+// Trust one proxy: take the right-most X-Forwarded-For entry.
+const ip = getIp(req.raw, { trustProxy: 1, server });
 ```
 
 ### Using an existing Bun server
@@ -173,7 +181,7 @@ The changes worth reading twice:
 
 - **`getHttpServer()` returns a `BunHttpServer` wrapper**, because NestJS requires an EventEmitter-shaped server and `Bun.serve()`'s return value is not one. Use `.server` for `reload()`, `publish()` and `requestIP()`; it is `null` before `listen()` and after `close()`.
 - **`bodyPromise` is lazy and renamed.** It is not called `body` because `Request.body` is already the raw `ReadableStream`. The rename is deliberate: `req.parsedBody` is now a compile error you fix once, rather than a cast that keeps compiling and hands your code a `Promise` at runtime. It is `undefined` — with nothing read — for `GET`/`HEAD`/`OPTIONS`, and `await undefined` is `undefined`, so one `await` covers both cases.
-- **`trustProxy` defaults to `false`.** See [`trustProxy`](#trustproxy) above for the `boolean | number` semantics. If you were relying on `req.ip` behind a load balancer, set it explicitly — prefer the hop count over `true`.
+- **`trustProxy` defaults to `false`.** See [`trustProxy`](#trustproxy) above. If you were relying on `req.ip` behind a load balancer, set it to `true` explicitly.
 - **Two removed Fastify hooks have NestJS equivalents**: `onReady` → `onApplicationBootstrap`, `onClose` → `onApplicationShutdown`. Move that code to the NestJS lifecycle rather than reimplementing it. `preParsing`, `onTimeout` and `onListen` have no equivalent; for `onListen`, just run the code after `await app.listen()`.
 - **`addHook()` now throws on an unsupported name** instead of silently dropping the registration, so a hook that was quietly never running will now surface at startup.
 

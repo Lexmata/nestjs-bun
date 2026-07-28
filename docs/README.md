@@ -1,6 +1,6 @@
 # Documentation site
 
-The documentation site for [`@lexmata/nestjs-platform-bun`](https://github.com/quinnjr/nestjs-bun) —
+The documentation site for [`@lexmata/nestjs-platform-bun`](https://github.com/Lexmata/nestjs-bun) —
 a NestJS HTTP adapter that runs on Bun's native server.
 
 It is a standalone Angular 21 application with its own `package.json` and lockfile, so it is

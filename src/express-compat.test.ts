@@ -186,6 +186,58 @@ describe("createExpressRequest", () => {
     expect(req.query).toEqual({ a: ["1", "2"], b: "3" });
   });
 
+  // Both parsers take keys straight from the client, so the two ways a plain
+  // object mishandles an attacker-chosen key are reachable over the wire.
+  it("should keep __proto__ as an own query key without touching the prototype", () => {
+    const req = createExpressRequest(new Request("http://localhost/?__proto__=a&__proto__=b"));
+    const query = req.query as Record<string, unknown>;
+
+    expect(Object.getPrototypeOf(query)).toBe(Object.prototype);
+    expect(Object.hasOwn(query, "__proto__")).toBe(true);
+    expect(query["__proto__"]).toEqual(["a", "b"]);
+  });
+
+  it("should not read inherited Object members when folding repeated query keys", () => {
+    const req = createExpressRequest(new Request("http://localhost/?constructor=1&toString=2"));
+
+    expect(req.query).toEqual({ constructor: "1", toString: "2" });
+  });
+
+  // Header names are lowercased in transit, which rules out `toString` and
+  // `valueOf` but NOT `__proto__` or `constructor` - both are already lower
+  // case and both arrive intact.
+  it("should not read inherited Object members when folding repeated headers", () => {
+    const req = createExpressRequest(
+      new Request("http://localhost", { headers: { constructor: "evil" } })
+    );
+
+    expect(req.headers.constructor).toBe("evil");
+  });
+
+  // The twin of the query-side test above. Without `setOwn` this header is
+  // silently dropped rather than mis-folded, so `Object.hasOwn` alone does not
+  // catch it - a guard reading this header would see `undefined`.
+  it("should keep __proto__ as an own header key without touching the prototype", () => {
+    const req = createExpressRequest(
+      new Request("http://localhost", { headers: new Headers([["__proto__", "evil"]]) })
+    );
+    const headers = req.headers as Record<string, unknown>;
+
+    expect(Object.getPrototypeOf(headers)).toBe(Object.prototype);
+    expect(Object.hasOwn(headers, "__proto__")).toBe(true);
+    expect(headers["__proto__"]).toBe("evil");
+  });
+
+  it("should keep prototype-named cookies instead of dropping them", () => {
+    const req = createExpressRequest(
+      new Request("http://localhost", {
+        headers: { Cookie: "constructor=abc; toString=def; ok=1" },
+      })
+    );
+
+    expect(req.cookies).toEqual({ constructor: "abc", toString: "def", ok: "1" });
+  });
+
   it("should decode percent-encoded cookie values", () => {
     const bunRequest = new Request("http://localhost", {
       headers: { Cookie: "redirect=%2Fdash%3Fa%3D1; name=John%20Doe" },
@@ -240,6 +292,169 @@ describe("createExpressRequest", () => {
     const req = createExpressRequest(bunRequest);
 
     expect(req.xhr).toBe(false);
+  });
+
+  // The adapter already parses the request URL to route the request; handing
+  // that URL back avoids a second `new URL()` per request. The parsed URL is the
+  // sole source of path/query/host, so it has to be honoured everywhere — and it
+  // has to be the request's own URL, or middleware authorises a different path
+  // from the one the router matched.
+  //
+  // Every test here is falsifiable: replacing `parsedUrl ?? new URL(...)` with a
+  // plain `new URL(bunRequest.url)` fails them. Comparing the two forms of the
+  // call cannot, because a coherent `parsedUrl` is by definition equal to what
+  // the fallback would build, so those comparisons are omitted.
+  describe("pre-parsed URL", () => {
+    /**
+     * Serialises to the request's own href — so it satisfies the coherence
+     * guard — while reporting tagged components. Anything the built request
+     * derives from `parsedUrl` therefore carries a value that re-parsing
+     * `bunRequest.url` could never produce.
+     */
+    class TaggedURL extends URL {
+      public get hostname(): string {
+        return "tagged.invalid";
+      }
+
+      public get pathname(): string {
+        return "/tagged/path";
+      }
+
+      public get protocol(): string {
+        return "https:";
+      }
+
+      public get searchParams(): URLSearchParams {
+        return new URLSearchParams("tagged=yes");
+      }
+    }
+
+    it("should derive path, url, hostname and query from the supplied instance", () => {
+      const bunRequest = new Request("http://localhost:3000/path?foo=bar");
+      const req = createExpressRequest(
+        bunRequest,
+        { id: "123" },
+        false,
+        undefined,
+        new TaggedURL(bunRequest.url)
+      );
+
+      // Read off the supplied instance, not off a fresh parse of the request
+      expect(req.path).toBe("/tagged/path");
+      expect(req.url).toBe("/tagged/path?foo=bar");
+      expect(req.originalUrl).toBe("/tagged/path?foo=bar");
+      expect(req.hostname).toBe("tagged.invalid");
+      expect(req.query).toEqual({ tagged: "yes" });
+    });
+
+    it("should read the lazy getters off the supplied instance too", () => {
+      // `hostname`, `protocol` and `query` are resolved on first access rather
+      // than at construction, so they need their own coverage: a build that
+      // used `parsedUrl` eagerly but re-parsed lazily would pass the test above.
+      const bunRequest = new Request("http://localhost:3000/path?foo=bar");
+      const req = createExpressRequest(
+        bunRequest,
+        {},
+        false,
+        undefined,
+        new TaggedURL(bunRequest.url)
+      );
+
+      expect(req.hostname).toBe("tagged.invalid");
+      // The request is plain http; only the supplied instance says otherwise
+      expect(req.protocol).toBe("https");
+      expect(req.secure).toBe(true);
+      expect(req.query).toEqual({ tagged: "yes" });
+    });
+
+    it("should not construct a second URL when one is supplied", () => {
+      const bunRequest = new Request("http://localhost:3000/path?foo=bar");
+      const parsed = new URL(bunRequest.url);
+
+      const RealURL = globalThis.URL;
+      let constructions = 0;
+      class CountingURL extends RealURL {
+        constructor(url: string | URL, base?: string | URL) {
+          super(url, base);
+          constructions++;
+        }
+      }
+
+      globalThis.URL = CountingURL as unknown as typeof URL;
+      try {
+        const withParsed = createExpressRequest(bunRequest, {}, false, undefined, parsed);
+        expect(constructions).toBe(0);
+        // Touch the lazy getters as well — none of them may re-parse either.
+        expect(withParsed.path).toBe("/path");
+        expect(withParsed.hostname).toBe("localhost");
+        expect(withParsed.query).toEqual({ foo: "bar" });
+        expect(constructions).toBe(0);
+
+        // The same call without the argument pays for exactly the parse the
+        // parameter exists to avoid.
+        createExpressRequest(bunRequest);
+        expect(constructions).toBe(1);
+      } finally {
+        globalThis.URL = RealURL;
+      }
+    });
+
+    describe("coherence guard", () => {
+      // Each of these is a real normalisation a caller might apply before
+      // constructing the request, and each makes the request describe a
+      // different resource from the one the router matched.
+      const cases: Array<[string, string, string]> = [
+        ["collapsed duplicate slashes", "http://localhost:3000/a//b", "http://localhost:3000/a/b"],
+        ["stripped trailing slash", "http://localhost:3000/admin/", "http://localhost:3000/admin"],
+        ["lower-cased path", "http://localhost:3000/Admin", "http://localhost:3000/admin"],
+        ["dropped query string", "http://localhost:3000/a?role=user", "http://localhost:3000/a"],
+        ["different host", "http://localhost:3000/a", "http://evil.example/a"],
+      ];
+
+      for (const [label, requestUrl, suppliedUrl] of cases) {
+        it(`should reject a ${label}`, () => {
+          const bunRequest = new Request(requestUrl);
+
+          expect(() =>
+            createExpressRequest(bunRequest, {}, false, undefined, new URL(suppliedUrl))
+          ).toThrow(TypeError);
+          expect(() =>
+            createExpressRequest(bunRequest, {}, false, undefined, new URL(suppliedUrl))
+          ).toThrow("parsedUrl must describe bunRequest.url");
+        });
+      }
+
+      it("should accept the canonical form of a non-normalised request URL", () => {
+        // An absolute-form request target ("GET http://host/a/../b HTTP/1.1")
+        // reaches Bun un-normalised on `request.url`, so the adapter's
+        // `new URL(bunRequest.url)` is not string-identical to it. It still
+        // describes the request, so it must be accepted.
+        const bunRequest = new Request("http://localhost:3000/b?x=1");
+        Object.defineProperty(bunRequest, "url", {
+          value: "http://localhost:3000/a/../b?x=1",
+          configurable: true,
+        });
+
+        const req = createExpressRequest(
+          bunRequest,
+          {},
+          false,
+          undefined,
+          new URL(bunRequest.url)
+        );
+
+        expect(req.path).toBe("/b");
+        expect(req.query).toEqual({ x: "1" });
+      });
+    });
+
+    it("should still parse the URL when the parameter is omitted", () => {
+      const bunRequest = new Request("http://localhost/omitted?q=1");
+      const req = createExpressRequest(bunRequest, {}, false, undefined);
+
+      expect(req.path).toBe("/omitted");
+      expect(req.query).toEqual({ q: "1" });
+    });
   });
 
   describe("get method", () => {

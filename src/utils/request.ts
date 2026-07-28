@@ -79,21 +79,48 @@ export function parseQueryParams(url: URL): Record<string, string | string[]> {
 }
 
 /**
+ * Assign a client-controlled key onto a parsed-data object as an own property.
+ *
+ * Plain `target[key] = value` is wrong for anything derived from a request, in
+ * two ways that are both reachable over the wire:
+ *
+ * - `__proto__` hits `Object.prototype`'s setter instead of creating a
+ *   property. A string value is silently dropped; an object value (a `File`
+ *   from a multipart part, an array from repeated keys) re-points the target's
+ *   prototype, so `instanceof` and `constructor` lie and every inherited
+ *   accessor throws when invoked on it.
+ * - Reading `target[key]` back to test for a previous occurrence sees inherited
+ *   members, so a `constructor` key folds `[Object, "value"]` into the result.
+ *
+ * Pair it with `Object.hasOwn` for the existence test. Shared by every parser
+ * that turns request input into an object - query, headers, cookies and body,
+ * in both compat layers - because a copy that misses the fix is invisible.
+ */
+export function setOwn<T>(target: Record<string, T>, key: string, value: T): void {
+  Object.defineProperty(target, key, {
+    value,
+    writable: true,
+    enumerable: true,
+    configurable: true,
+  });
+}
+
+/**
  * Collapse an iterable of `[key, value]` pairs into an object, promoting
  * repeated keys to arrays instead of silently discarding earlier values.
  */
 function groupEntries<T>(entries: Iterable<[string, T]>): Record<string, T | T[]> {
   const result: Record<string, T | T[]> = {};
   for (const [key, value] of entries) {
-    if (!Object.prototype.hasOwnProperty.call(result, key)) {
-      result[key] = value;
+    if (!Object.hasOwn(result, key)) {
+      setOwn(result, key, value);
       continue;
     }
     const existing = result[key];
     if (Array.isArray(existing)) {
       existing.push(value);
     } else {
-      result[key] = [existing as T, value];
+      setOwn(result, key, [existing as T, value]);
     }
   }
   return result;
