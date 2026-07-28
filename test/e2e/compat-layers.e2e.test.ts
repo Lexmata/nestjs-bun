@@ -15,8 +15,6 @@ import {
   createFastifyReply,
   FastifyHooksManager,
   FastifyPluginRegistry,
-  isFastifyMiddleware,
-  markAsFastify,
 } from "../../src/fastify-compat";
 
 describe("Express Compatibility E2E", () => {
@@ -1225,26 +1223,6 @@ describe("Fastify Branch Coverage", () => {
     await expect(
       registry.initializePlugins(mockInstance as unknown as Parameters<typeof registry.initializePlugins>[0])
     ).rejects.toThrow("Plugin init failed");
-  });
-});
-
-describe("Fastify Middleware Markers", () => {
-  it("should identify unmarked functions as not Fastify", () => {
-    const fn = () => {};
-    expect(isFastifyMiddleware(fn)).toBe(false);
-  });
-
-  it("should mark and identify Fastify middleware", () => {
-    const fn = () => {};
-    const marked = markAsFastify(fn);
-    expect(isFastifyMiddleware(marked)).toBe(true);
-  });
-
-  it("should return the same function when marking", () => {
-    const fn = () => "test";
-    const marked = markAsFastify(fn);
-    expect(marked).toBe(fn);
-    expect(marked()).toBe("test");
   });
 });
 

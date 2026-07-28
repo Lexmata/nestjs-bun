@@ -6,7 +6,15 @@
  */
 
 import { describe, it, expect, beforeAll, afterAll, beforeEach, afterEach } from "vitest";
-import { existsSync, mkdtempSync, readFileSync, rmSync, unlinkSync } from "node:fs";
+import {
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  unlinkSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { BunAdapter } from "../../src/bun-adapter";
@@ -1193,5 +1201,143 @@ describeIfBun("BunAdapter E2E", () => {
         await externalAdapter.close();
       }
     });
+  });
+
+  describe("static asset memory", () => {
+    /**
+     * Must run in a subprocess: the assertion is about this process's peak RSS,
+     * which the test runner's own allocations would swamp.
+     *
+     * Streaming and buffering are indistinguishable over HTTP, so peak memory is
+     * the only observable difference. Measured on this machine at 64 MB x 8
+     * concurrent readers: ~157 MB streaming (`res.send(file)`) versus ~1068 MB
+     * buffering (`res.send(new Uint8Array(await file.arrayBuffer()))`) - a 6.8x
+     * gap. The threshold sits between them with room for GC timing.
+     */
+    it("does not scale peak memory with filesize x concurrency", async () => {
+      const dir = mkdtempSync(join(tmpdir(), "bun-adapter-static-rss-"));
+      // The served root is a subdirectory so the generated script is not itself
+      // reachable over HTTP as test scaffolding.
+      const assets = join(dir, "assets");
+      mkdirSync(assets);
+      const script = join(dir, "rss.ts");
+      const adapterPath = join(import.meta.dir, "..", "..", "src", "bun-adapter.ts");
+      const sizeMb = 64;
+      const concurrency = 8;
+
+      writeFileSync(
+        script,
+        [
+          `import { BunAdapter } from ${JSON.stringify(adapterPath)};`,
+          `import { writeFileSync } from "node:fs";`,
+          `import { join } from "node:path";`,
+          `const SIZE = ${sizeMb} * 1024 * 1024;`,
+          `writeFileSync(join(${JSON.stringify(assets)}, "big.bin"), Buffer.alloc(SIZE, 0x61));`,
+          `const adapter = new BunAdapter();`,
+          `adapter.useStaticAssets(${JSON.stringify(assets)});`,
+          `await adapter.listen(0);`,
+          `const port = adapter.getHttpServer().server.port;`,
+          `const base = process.memoryUsage.rss();`,
+          `let peak = base;`,
+          `await Promise.all(Array.from({ length: ${concurrency} }, async () => {`,
+          `  const response = await fetch("http://127.0.0.1:" + port + "/big.bin");`,
+          // Without these two checks the whole test passes when static serving
+          // is broken: a 404 streams nothing, so peak RSS stays near zero and
+          // the memory assertion is satisfied by the file never being served.
+          `  if (response.status !== 200) throw new Error("expected 200, got " + response.status);`,
+          `  const reader = response.body.getReader();`,
+          `  let bytes = 0;`,
+          `  for (;;) {`,
+          `    const { done, value } = await reader.read();`,
+          `    if (value) bytes += value.byteLength;`,
+          `    peak = Math.max(peak, process.memoryUsage.rss());`,
+          `    if (done) break;`,
+          `  }`,
+          `  if (bytes !== SIZE) throw new Error("short read: " + bytes + " of " + SIZE);`,
+          `}));`,
+          `console.log(Math.round((peak - base) / 1024 / 1024));`,
+          `await adapter.close();`,
+        ].join("\n")
+      );
+
+      let proc: ReturnType<typeof Bun.spawn> | undefined;
+      try {
+        proc = Bun.spawn(["bun", script], { stdout: "pipe", stderr: "pipe" });
+        // Drain both pipes concurrently: an undrained stderr larger than the
+        // pipe buffer blocks the child forever, and the test then dies on its
+        // timeout rather than on its assertion.
+        const [stdout, stderr] = await Promise.all([
+          new Response(proc.stdout).text(),
+          new Response(proc.stderr).text(),
+        ]);
+        const exitCode = await proc.exited;
+
+        expect({ exitCode, stderr }).toEqual({ exitCode: 0, stderr: "" });
+        const peakDeltaMb = Number.parseInt(stdout.trim(), 10);
+        expect(Number.isNaN(peakDeltaMb)).toBe(false);
+        // Buffering costs ~16x the file size here; streaming ~2.5x.
+        expect(peakDeltaMb).toBeLessThan(sizeMb * 6);
+      } finally {
+        proc?.kill();
+        rmSync(dir, { recursive: true, force: true });
+      }
+    }, 60_000);
+  });
+
+  describe("close() event-loop handles", () => {
+    /**
+     * Must run in a subprocess: the assertion is about whether the runtime has
+     * anything left keeping it alive after `close()` resolves, which is only
+     * observable as process exit. Inside `bun test` the runner's own handles
+     * mask it entirely.
+     *
+     * `Promise.race` does not cancel the loser. Racing the graceful stop
+     * against `Bun.sleep(drainTimeoutMs)` therefore left the drain timer armed
+     * and referenced, so `close()` returned in ~0ms but the process hung for
+     * the full 10s window. Restoring that form fails this test.
+     *
+     * The child reports the wall clock at which `close()` resolved, and the
+     * assertion is on the gap between that and process exit - not on total
+     * runtime. That isolates the leaked handle from runtime startup, and keeps
+     * the test meaningful if the drain window is ever shortened.
+     */
+    it("releases the drain timer so the process exits once close() resolves", async () => {
+      const dir = mkdtempSync(join(tmpdir(), "bun-adapter-close-"));
+      const script = join(dir, "close-exit.ts");
+      const adapterPath = join(import.meta.dir, "..", "..", "src", "bun-adapter.ts");
+
+      writeFileSync(
+        script,
+        [
+          `import { BunAdapter } from ${JSON.stringify(adapterPath)};`,
+          `const adapter = new BunAdapter();`,
+          `adapter.get("/", (_req, res) => res.send("ok"));`,
+          `await adapter.listen(0);`,
+          `await adapter.close();`,
+          `console.log(Date.now());`,
+        ].join("\n")
+      );
+
+      let proc: ReturnType<typeof Bun.spawn> | undefined;
+      try {
+        proc = Bun.spawn(["bun", script], { stdout: "pipe", stderr: "pipe" });
+        const [stdout, stderr] = await Promise.all([
+          new Response(proc.stdout).text(),
+          new Response(proc.stderr).text(),
+        ]);
+        const exitCode = await proc.exited;
+        const exitedAt = Date.now();
+
+        expect({ exitCode, stderr }).toEqual({ exitCode: 0, stderr: "" });
+        const closedAt = Number.parseInt(stdout.trim(), 10);
+        expect(Number.isNaN(closedAt)).toBe(false);
+        // A leaked timer pins the process for the whole drain window (10s); a
+        // released one lets Bun exit as soon as the script ends.
+        expect(exitedAt - closedAt).toBeLessThan(2_000);
+      } finally {
+        proc?.kill();
+        rmSync(dir, { recursive: true, force: true });
+      }
+    }, 30_000);
   });
 });

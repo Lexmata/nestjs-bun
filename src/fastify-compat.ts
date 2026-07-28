@@ -8,6 +8,7 @@
  */
 
 import { Logger } from "@nestjs/common";
+import { setOwn } from "./utils/request";
 
 /** Shared logger so diagnostics honour the app's log level and structured output. */
 const logger = new Logger("FastifyCompat");
@@ -286,6 +287,53 @@ export interface CreateFastifyRequestOptions {
    * The peer/socket address of the connection, when the server can provide it.
    */
   remoteAddress?: string;
+
+  /**
+   * An already-parsed `new URL(bunRequest.url)`.
+   *
+   * Purely an optimisation for callers that have one in hand (the adapter
+   * parses the URL to route the request); omit it and the URL is parsed here
+   * instead.
+   *
+   * It **must describe `bunRequest.url`** and is checked: it is the sole source
+   * of `url`, `routerPath`, `query` and `hostname`, so a caller that normalises
+   * the URL first (collapsing `//`, stripping a trailing `/`, lower-casing)
+   * would make hooks and handlers read a different path from the one the router
+   * matched. {@link createFastifyRequest} throws a `TypeError` rather than
+   * build such a request — see {@link assertDescribesRequest}.
+   *
+   * Unlike `createExpressRequest`, which retains the instance and reads
+   * `hostname`, `protocol` and `query` from it lazily, this function reads it
+   * fully during construction and does not hold a reference. Mutating it
+   * afterwards cannot corrupt an already-built request — but mutating it
+   * *before* handing it over still can, so treat it as read-only either way.
+   */
+  parsedUrl?: URL;
+}
+
+/**
+ * Reject a pre-parsed URL that does not describe the request it is passed with.
+ *
+ * `parsedUrl` becomes the only source of the request's path, query and host, so
+ * an unrelated (or "helpfully normalised") URL is a parser-confusion primitive:
+ * middleware and handlers would authorise one path while the router matched
+ * another.
+ *
+ * The fast path is a single string comparison — `bunRequest.url` is already a
+ * serialised WHATWG URL, so re-parsing it is idempotent and `href` matches
+ * exactly. The re-parse is reached only by absolute-form request targets
+ * (`GET http://host/a/../b HTTP/1.1`), which Bun surfaces on `request.url`
+ * un-normalised; there `new URL(...).href` is the other legitimate spelling of
+ * the same URL. Measured on Bun 1.x the comparison costs ~21ns against ~495ns
+ * for the `new URL()` it replaces, so the optimisation survives the check.
+ *
+ * NOTE: deliberately duplicated in `src/express-compat.ts`. The two compat
+ * layers share no module by design; keep the two copies in step.
+ */
+function assertDescribesRequest(parsedUrl: URL, bunRequest: Request): void {
+  if (parsedUrl.href === bunRequest.url) return;
+  if (new URL(bunRequest.url).href === parsedUrl.href) return;
+  throw new TypeError("parsedUrl must describe bunRequest.url");
 }
 
 /**
@@ -294,7 +342,9 @@ export interface CreateFastifyRequestOptions {
  * @param bunRequest - the incoming Bun/WHATWG request
  * @param params - route parameters extracted by the router
  * @param requestId - explicit request id (generated when omitted)
- * @param options - see {@link CreateFastifyRequestOptions}
+ * @param options - see {@link CreateFastifyRequestOptions}, including the
+ *   optional `parsedUrl` fast path
+ * @throws TypeError when `options.parsedUrl` does not describe `bunRequest.url`
  */
 export function createFastifyRequest(
   bunRequest: Request,
@@ -302,20 +352,39 @@ export function createFastifyRequest(
   requestId?: string,
   options: CreateFastifyRequestOptions = {}
 ): FastifyRequest {
-  const url = new URL(bunRequest.url);
-  const { routePattern, trustProxy = false, remoteAddress } = options;
+  const { routePattern, trustProxy = false, remoteAddress, parsedUrl } = options;
 
-  // Parse headers into object
-  const headers: Record<string, string | undefined> = {};
-  bunRequest.headers.forEach((value, key) => {
-    headers[key] = value;
-  });
+  if (parsedUrl !== undefined) {
+    assertDescribesRequest(parsedUrl, bunRequest);
+  }
+
+  const url = parsedUrl ?? new URL(bunRequest.url);
 
   // Parse query string (last-wins for repeated keys, see FastifyRequest.query)
+  //
+  // `url.searchParams` lazily constructs and caches a URLSearchParams on the
+  // URL, so a request with no query string skips that allocation entirely. The
+  // resulting object is `{}` either way. Guarding here rather than deferring
+  // `query` itself keeps the promise in this function's doc comment that
+  // `parsedUrl` is not retained.
   const query: Record<string, string> = {};
-  url.searchParams.forEach((value, key) => {
-    query[key] = value;
-  });
+  if (url.search !== "") {
+    url.searchParams.forEach((value, key) => {
+      setOwn(query, key, value);
+    });
+  }
+
+  // Deferred: an incoming request's Headers is immutable, so walking it on
+  // first read cannot observe a different value than walking it eagerly - and
+  // a typical request carries 10-15 headers that most hooks never look at.
+  let headersCache: Record<string, string | undefined> | undefined;
+  const buildHeaders = (): Record<string, string | undefined> => {
+    const result: Record<string, string | undefined> = {};
+    bunRequest.headers.forEach((value, key) => {
+      setOwn(result, key, value);
+    });
+    return result;
+  };
 
   // Resolve the client address. Proxy headers are only honoured when the
   // caller opted into trusting them; otherwise they are trivially spoofable.
@@ -363,7 +432,15 @@ export function createFastifyRequest(
     params,
     query,
     body: undefined,
-    headers,
+
+    get headers(): Record<string, string | undefined> {
+      headersCache ??= buildHeaders();
+      return headersCache;
+    },
+    set headers(value: Record<string, string | undefined>) {
+      headersCache = value;
+    },
+
     method: bunRequest.method,
     url: url.pathname + url.search,
     routerPath: routePattern ?? url.pathname,
@@ -401,8 +478,9 @@ function createValidationNotImplementedError(): Error {
 /**
  * Statuses for which the fetch `Response` constructor forbids a body.
  *
- * NOTE: duplicated in `src/express-compat.ts` and `src/utils/response.ts`; all
- * three must stay in sync with the Fetch spec's null-body status set.
+ * NOTE: duplicated verbatim in `src/express-compat.ts`, `src/bun-adapter.ts`
+ * and `src/utils/response.ts`. All four must stay in sync with the Fetch
+ * spec's null-body status set.
  */
 const NULL_BODY_STATUSES = new Set([101, 204, 205, 304]);
 
@@ -501,7 +579,7 @@ export function createFastifyReply(
     getHeaders(): Record<string, string> {
       const result: Record<string, string> = {};
       headers.forEach((value, key) => {
-        result[key] = value;
+        setOwn(result, key, value);
       });
       return result;
     },
@@ -649,6 +727,17 @@ export class FastifyHooksManager {
    */
   private hookTimeout: number;
 
+  /**
+   * Number of hooks accepted by {@link addHook}, maintained by the single
+   * mutator so {@link hasHooks} is O(1) and cannot drift.
+   *
+   * Deliberately a counter rather than a scan of the seven arrays: the point of
+   * {@link hasHooks} is that callers gate the Fastify request path on the
+   * manager's own state instead of a hand-maintained latch, so a future hook
+   * bucket that someone forgets to add to a scan must be impossible.
+   */
+  private hookCount = 0;
+
   private onRequestHooks: FastifyOnRequestHook[] = [];
   private preValidationHooks: FastifyPreValidationHook[] = [];
   private preHandlerHooks: FastifyPreHandlerHook[] = [];
@@ -675,6 +764,21 @@ export class FastifyHooksManager {
   /** The timeout currently applied to each hook, in milliseconds. */
   public getHookTimeout(): number {
     return this.hookTimeout;
+  }
+
+  /**
+   * Whether any hook has been registered.
+   *
+   * O(1), derived from {@link addHook} itself. Callers that skip the whole
+   * Fastify request path when nothing is registered must gate on this rather
+   * than on a boolean they set at each call site: a latch maintained by hand is
+   * one forgotten assignment away from silently disabling every hook.
+   *
+   * A rejected hook name does not count — {@link addHook} throws before the
+   * counter moves.
+   */
+  public hasHooks(): boolean {
+    return this.hookCount > 0;
   }
 
   public addHook(name: "onRequest", hook: FastifyOnRequestHook): void;
@@ -715,6 +819,10 @@ export class FastifyHooksManager {
       default:
         throw new Error(`Fastify hook "${name}" is not supported by BunAdapter`);
     }
+
+    // Only reached when the switch accepted the name; an unsupported hook threw
+    // above and must not flip `hasHooks()`.
+    this.hookCount++;
   }
 
   public async executeOnRequest(request: FastifyRequest, reply: FastifyReply): Promise<Error | undefined> {
@@ -984,8 +1092,34 @@ export class FastifyPluginRegistry {
   private instance?: FastifyInstance;
   private appliedInstanceKeys: Set<string> = new Set();
 
+  /**
+   * Set by every mutator on this registry; read by {@link hasAny}.
+   *
+   * One flag rather than six collection checks, so that adding a seventh kind
+   * of registration cannot leave {@link hasAny} reporting an empty registry.
+   */
+  private used = false;
+
+  /**
+   * Whether anything at all has been registered — a plugin, an instance
+   * decorator, a request or reply decorator, or a lazy request/reply decorator.
+   *
+   * O(1). Callers that skip the Fastify request path for an untouched registry
+   * must gate on this instead of a latch they set at each call site: every
+   * mutator here sets the flag, so a new mutator inherits the behaviour and a
+   * new adapter wrapper cannot silently disable the Fastify path.
+   */
+  public hasAny(): boolean {
+    return this.used;
+  }
+
   public decorate<T>(name: string, value: T): void {
     this.decorators.set(name, value);
+    // Flagged as soon as the decorator is observable (`hasDecorator`,
+    // `applyInstanceDecorators`), which is *before* the attach below — that
+    // call throws on a duplicate name, and a registry holding a decorator must
+    // never report itself empty.
+    this.used = true;
     if (this.instance) {
       this.attachInstanceDecorator(this.instance, name, value);
     }
@@ -993,10 +1127,12 @@ export class FastifyPluginRegistry {
 
   public decorateRequest<T>(name: string, value: T): void {
     this.requestDecorators.set(name, value);
+    this.used = true;
   }
 
   public decorateReply<T>(name: string, value: T): void {
     this.replyDecorators.set(name, value);
+    this.used = true;
   }
 
   /**
@@ -1007,6 +1143,7 @@ export class FastifyPluginRegistry {
    */
   public decorateRequestLazy(name: string, factory: (request: FastifyRequest) => unknown): void {
     this.requestDecoratorFactories.set(name, factory);
+    this.used = true;
   }
 
   /**
@@ -1014,6 +1151,7 @@ export class FastifyPluginRegistry {
    */
   public decorateReplyLazy(name: string, factory: (reply: FastifyReply) => unknown): void {
     this.replyDecoratorFactories.set(name, factory);
+    this.used = true;
   }
 
   public hasDecorator(name: string): boolean {
@@ -1069,6 +1207,9 @@ export class FastifyPluginRegistry {
       throw new Error("plugin prefix is not supported");
     }
     this.plugins.push({ plugin: plugin as FastifyPlugin, opts });
+    // Rejected `prefix` threw above, so a failed registration leaves the
+    // registry reporting itself empty.
+    this.used = true;
   }
 
   /**
@@ -1160,24 +1301,3 @@ export class FastifyPluginRegistry {
  * Type for Fastify-style middleware (using hooks pattern)
  */
 export type FastifyMiddleware = FastifyOnRequestHook | FastifyPreHandlerHook;
-
-/**
- * Check whether a function has been explicitly tagged as Fastify middleware.
- *
- * There is no arity- or shape-based detection: Fastify hooks
- * `(request, reply, done)` and Express middleware `(req, res, next)` are
- * indistinguishable at runtime. Only functions passed through
- * {@link markAsFastify} return `true`.
- */
-export function isFastifyMiddleware(fn: (...args: unknown[]) => unknown): boolean {
-  return (fn as { _fastify?: boolean })._fastify === true;
-}
-
-/**
- * Mark a function as Fastify middleware so {@link isFastifyMiddleware}
- * recognises it.
- */
-export function markAsFastify<T extends (...args: unknown[]) => unknown>(fn: T): T {
-  (fn as T & { _fastify: boolean })._fastify = true;
-  return fn;
-}

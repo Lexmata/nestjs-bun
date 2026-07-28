@@ -6,8 +6,6 @@ import {
   DEFAULT_HOOK_TIMEOUT_MS,
   FastifyHooksManager,
   FastifyPluginRegistry,
-  isFastifyMiddleware,
-  markAsFastify,
   SUPPORTED_FASTIFY_HOOKS,
   type FastifyInstance,
   type FastifyReply,
@@ -146,6 +144,152 @@ describe("createFastifyRequest", () => {
     const req = createFastifyRequest(bunRequest);
 
     expect(req.query).toEqual({ a: "2" });
+  });
+
+  // The adapter already parses the request URL to route the request; handing
+  // that URL back avoids a second `new URL()` per request. The parsed URL is the
+  // sole source of url/query/hostname, so it has to be honoured everywhere — and
+  // it has to be the request's own URL, or hooks read a different path from the
+  // one the router matched.
+  //
+  // Every test here is falsifiable: replacing `options.parsedUrl ?? new URL(...)`
+  // with a plain `new URL(bunRequest.url)` fails them. Comparing the two forms
+  // of the call cannot, because a coherent `parsedUrl` is by definition equal to
+  // what the fallback would build, so those comparisons are omitted.
+  describe("pre-parsed URL", () => {
+    /**
+     * Serialises to the request's own href — so it satisfies the coherence
+     * guard — while reporting tagged components. Anything the built request
+     * derives from `parsedUrl` therefore carries a value that re-parsing
+     * `bunRequest.url` could never produce.
+     */
+    class TaggedURL extends URL {
+      public get hostname(): string {
+        return "tagged.invalid";
+      }
+
+      public get pathname(): string {
+        return "/tagged/path";
+      }
+
+      public get protocol(): string {
+        return "https:";
+      }
+
+      public get searchParams(): URLSearchParams {
+        return new URLSearchParams("tagged=yes");
+      }
+    }
+
+    it("should derive url, routerPath, hostname and query from the supplied instance", () => {
+      const bunRequest = new Request("http://localhost:3000/users/123?foo=bar");
+      const req = createFastifyRequest(bunRequest, { id: "123" }, "req-1", {
+        parsedUrl: new TaggedURL(bunRequest.url),
+      });
+
+      // Read off the supplied instance, not off a fresh parse of the request
+      expect(req.hostname).toBe("tagged.invalid");
+      expect(req.routerPath).toBe("/tagged/path");
+      expect(req.url).toBe("/tagged/path?foo=bar");
+      expect(req.query).toEqual({ tagged: "yes" });
+      // The request is plain http; only the supplied instance says otherwise
+      expect(req.protocol).toBe("https");
+    });
+
+    it("should not construct a second URL when one is supplied", () => {
+      const bunRequest = new Request("http://localhost:3000/users/123?foo=bar");
+      const parsed = new URL(bunRequest.url);
+
+      const RealURL = globalThis.URL;
+      let constructions = 0;
+      class CountingURL extends RealURL {
+        constructor(url: string | URL, base?: string | URL) {
+          super(url, base);
+          constructions++;
+        }
+      }
+
+      globalThis.URL = CountingURL as unknown as typeof URL;
+      try {
+        const withParsed = createFastifyRequest(bunRequest, {}, "req-1", { parsedUrl: parsed });
+        expect(constructions).toBe(0);
+        expect(withParsed.url).toBe("/users/123?foo=bar");
+
+        // The same call without the option pays for exactly the parse the
+        // option exists to avoid.
+        createFastifyRequest(bunRequest, {}, "req-1");
+        expect(constructions).toBe(1);
+      } finally {
+        globalThis.URL = RealURL;
+      }
+    });
+
+    it("should keep parsedUrl in the options bag alongside the other options", () => {
+      const bunRequest = new Request("http://localhost:3000/users/123?foo=bar");
+      const req = createFastifyRequest(bunRequest, { id: "123" }, "req-1", {
+        routePattern: "/users/:id",
+        trustProxy: true,
+        remoteAddress: "10.0.0.1",
+        parsedUrl: new URL(bunRequest.url),
+      });
+
+      expect(req.routerPath).toBe("/users/:id");
+      expect(req.ip).toBe("10.0.0.1");
+      expect(req.url).toBe("/users/123?foo=bar");
+    });
+
+    describe("coherence guard", () => {
+      // Each of these is a real normalisation a caller might apply before
+      // constructing the request, and each makes the request describe a
+      // different resource from the one the router matched.
+      const cases: Array<[string, string, string]> = [
+        ["collapsed duplicate slashes", "http://localhost:3000/a//b", "http://localhost:3000/a/b"],
+        ["stripped trailing slash", "http://localhost:3000/admin/", "http://localhost:3000/admin"],
+        ["lower-cased path", "http://localhost:3000/Admin", "http://localhost:3000/admin"],
+        ["dropped query string", "http://localhost:3000/a?role=user", "http://localhost:3000/a"],
+        ["different host", "http://localhost:3000/a", "http://evil.example/a"],
+      ];
+
+      for (const [label, requestUrl, suppliedUrl] of cases) {
+        it(`should reject a ${label}`, () => {
+          const bunRequest = new Request(requestUrl);
+
+          expect(() =>
+            createFastifyRequest(bunRequest, {}, undefined, { parsedUrl: new URL(suppliedUrl) })
+          ).toThrow(TypeError);
+          expect(() =>
+            createFastifyRequest(bunRequest, {}, undefined, { parsedUrl: new URL(suppliedUrl) })
+          ).toThrow("parsedUrl must describe bunRequest.url");
+        });
+      }
+
+      it("should accept the canonical form of a non-normalised request URL", () => {
+        // An absolute-form request target ("GET http://host/a/../b HTTP/1.1")
+        // reaches Bun un-normalised on `request.url`, so the adapter's
+        // `new URL(bunRequest.url)` is not string-identical to it. It still
+        // describes the request, so it must be accepted.
+        const bunRequest = new Request("http://localhost:3000/b?x=1");
+        Object.defineProperty(bunRequest, "url", {
+          value: "http://localhost:3000/a/../b?x=1",
+          configurable: true,
+        });
+
+        const req = createFastifyRequest(bunRequest, {}, undefined, {
+          parsedUrl: new URL(bunRequest.url),
+        });
+
+        expect(req.url).toBe("/b?x=1");
+        expect(req.query).toEqual({ x: "1" });
+      });
+    });
+
+    it("should still parse the URL when the option is omitted", () => {
+      const bunRequest = new Request("http://localhost/omitted?q=1");
+      const req = createFastifyRequest(bunRequest, {}, undefined, {});
+
+      expect(req.url).toBe("/omitted?q=1");
+      expect(req.query).toEqual({ q: "1" });
+    });
   });
 
   describe("validation methods", () => {
@@ -726,6 +870,45 @@ describe("FastifyHooksManager", () => {
       expect(() => manager.addHook("notAHook", () => {})).toThrow(
         'Fastify hook "notAHook" is not supported by BunAdapter'
       );
+    });
+  });
+
+  // `hasHooks()` is what callers gate the Fastify request path on, so it has to
+  // be derived from `addHook` itself rather than from a latch maintained at the
+  // call site: a hook that is registered but not reported is a hook that never
+  // runs.
+  describe("hasHooks", () => {
+    it("should be false for a fresh manager", () => {
+      expect(new FastifyHooksManager().hasHooks()).toBe(false);
+    });
+
+    for (const name of SUPPORTED_FASTIFY_HOOKS) {
+      it(`should flip once a ${name} hook is registered`, () => {
+        const manager = new FastifyHooksManager();
+        expect(manager.hasHooks()).toBe(false);
+
+        manager.addHook(name, () => {});
+
+        expect(manager.hasHooks()).toBe(true);
+      });
+    }
+
+    it("should stay false when the hook name was rejected", () => {
+      const manager = new FastifyHooksManager();
+
+      expect(() => manager.addHook("preParsing", () => {})).toThrow();
+
+      // A rejected registration must not switch the request path on: the hook
+      // was never stored, so every stage would be a no-op.
+      expect(manager.hasHooks()).toBe(false);
+    });
+
+    it("should stay true after further hooks are added", () => {
+      const manager = new FastifyHooksManager();
+      manager.addHook("onRequest", () => {});
+      manager.addHook("onResponse", () => {});
+
+      expect(manager.hasHooks()).toBe(true);
     });
   });
 
@@ -1598,6 +1781,96 @@ describe("FastifyPluginRegistry", () => {
     });
   });
 
+  // `hasAny()` is what callers gate the Fastify request path on. Every mutator
+  // must set it, so that a new registration kind — or a new adapter wrapper
+  // around an existing one — cannot leave decorators registered but unapplied.
+  describe("hasAny", () => {
+    it("should be false for a fresh registry", () => {
+      expect(new FastifyPluginRegistry().hasAny()).toBe(false);
+    });
+
+    it("should flip on register", () => {
+      const registry = new FastifyPluginRegistry();
+      expect(registry.hasAny()).toBe(false);
+
+      registry.register((instance, opts, done) => done());
+
+      expect(registry.hasAny()).toBe(true);
+    });
+
+    it("should flip on decorate", () => {
+      const registry = new FastifyPluginRegistry();
+      expect(registry.hasAny()).toBe(false);
+
+      registry.decorate("config", { a: 1 });
+
+      expect(registry.hasAny()).toBe(true);
+    });
+
+    it("should flip on decorateRequest", () => {
+      const registry = new FastifyPluginRegistry();
+      expect(registry.hasAny()).toBe(false);
+
+      registry.decorateRequest("user", null);
+
+      expect(registry.hasAny()).toBe(true);
+    });
+
+    it("should flip on decorateReply", () => {
+      const registry = new FastifyPluginRegistry();
+      expect(registry.hasAny()).toBe(false);
+
+      registry.decorateReply("timing", null);
+
+      expect(registry.hasAny()).toBe(true);
+    });
+
+    it("should flip on decorateRequestLazy", () => {
+      const registry = new FastifyPluginRegistry();
+      expect(registry.hasAny()).toBe(false);
+
+      registry.decorateRequestLazy("startedAt", () => Date.now());
+
+      expect(registry.hasAny()).toBe(true);
+    });
+
+    it("should flip on decorateReplyLazy", () => {
+      const registry = new FastifyPluginRegistry();
+      expect(registry.hasAny()).toBe(false);
+
+      registry.decorateReplyLazy("startedAt", () => Date.now());
+
+      expect(registry.hasAny()).toBe(true);
+    });
+
+    it("should stay false when the registration was rejected", () => {
+      const registry = new FastifyPluginRegistry();
+
+      expect(() =>
+        registry.register((instance, opts, done) => done(), { prefix: "/api" })
+      ).toThrow("plugin prefix is not supported");
+
+      // The plugin was never stored, so nothing would run for it.
+      expect(registry.hasAny()).toBe(false);
+    });
+
+    it("should flip even when attaching a clashing instance decorator throws", () => {
+      // `decorate` records the decorator before attaching it, so a rejected
+      // attach still leaves the registry holding it. Reporting empty here would
+      // be exactly the drift `hasAny` exists to prevent — the opposite of the
+      // `register`/`addHook` case, where the throw precedes the mutation.
+      const registry = new FastifyPluginRegistry();
+      registry.applyInstanceDecorators({ prefix: "" } as FastifyInstance);
+
+      expect(() => registry.decorate("prefix", "/api")).toThrow(
+        'The decorator "prefix" has already been added to the Fastify instance'
+      );
+
+      expect(registry.hasAny()).toBe(true);
+      expect(registry.hasDecorator("prefix")).toBe(true);
+    });
+  });
+
   describe("register and initializePlugins", () => {
     it("should register and initialize plugins", async () => {
       const registry = new FastifyPluginRegistry();
@@ -1917,27 +2190,3 @@ describe("FastifyPluginRegistry", () => {
   });
 });
 
-describe("isFastifyMiddleware", () => {
-  it("should return true for marked functions", () => {
-    const fn = () => {};
-    markAsFastify(fn);
-
-    expect(isFastifyMiddleware(fn)).toBe(true);
-  });
-
-  it("should return false for unmarked functions", () => {
-    const fn = () => {};
-
-    expect(isFastifyMiddleware(fn)).toBe(false);
-  });
-});
-
-describe("markAsFastify", () => {
-  it("should mark function and return it", () => {
-    const fn = () => {};
-    const result = markAsFastify(fn);
-
-    expect(result).toBe(fn);
-    expect((fn as unknown as Record<string, unknown>)._fastify).toBe(true);
-  });
-});

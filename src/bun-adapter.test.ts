@@ -5,7 +5,7 @@ import {
   VersioningType,
   type VersioningOptions,
 } from "@nestjs/common";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readdirSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { BunAdapter } from "./bun-adapter";
@@ -14,7 +14,7 @@ import {
   type ExpressRequest,
   type ExpressResponse,
 } from "./express-compat";
-import type { FastifyInstance } from "./fastify-compat";
+import { FastifyPluginRegistry, type FastifyInstance } from "./fastify-compat";
 
 /**
  * The handler shape the adapter's route-registration methods accept. Declared
@@ -261,6 +261,43 @@ describe("BunAdapter", () => {
       const response = await fetch(`http://localhost:${server?.port}/api/test`);
       expect(response.status).toBe(200);
     });
+
+    // The prefix is baked into path/pathPattern/staticPaths by buildPath at
+    // registration time, so setting it afterwards cannot re-path a route that
+    // already exists. Pinned because the invalidation next to setGlobalPrefix
+    // reads as though it did.
+    it("should not apply a prefix retroactively to an already-registered route", async () => {
+      adapter.get("/test", (req, res) => res.send("ok"));
+      adapter.setGlobalPrefix("/api");
+
+      await adapter.listen(0);
+      expect((await fetch(`${baseUrl()}/test`)).status).toBe(200);
+      expect((await fetch(`${baseUrl()}/api/test`)).status).toBe(404);
+    });
+
+    // Middleware paths ARE resolved through buildPath per request, and that
+    // result is memoised on the entry. A prefix set after registration has to
+    // invalidate the memo, or the middleware keeps matching its old path.
+    it("should re-resolve a memoised middleware path when the prefix changes", async () => {
+      const seen: string[] = [];
+      adapter.use("/scoped", (req: ExpressRequest, _res: ExpressResponse, next: () => void) => {
+        seen.push(req.url);
+        next();
+      });
+      adapter.get("/api/scoped/thing", (req, res) => res.send("ok"));
+      adapter.get("/scoped/thing", (req, res) => res.send("ok"));
+
+      await adapter.listen(0);
+
+      // Resolve and memoise the middleware path under no prefix.
+      await fetch(`${baseUrl()}/scoped/thing`);
+      expect(seen).toEqual(["/scoped/thing"]);
+
+      adapter.setGlobalPrefix("/api");
+      await fetch(`${baseUrl()}/api/scoped/thing`);
+
+      expect(seen).toEqual(["/scoped/thing", "/api/scoped/thing"]);
+    });
   });
 
   describe("request body parsing", () => {
@@ -329,6 +366,39 @@ describe("BunAdapter", () => {
       });
       const body = (await response.json()) as Record<string, unknown>;
       expect(body.name).toBe("John");
+    });
+
+    // The request path skips parseRequestBody entirely when no Content-Type is
+    // declared. That shortcut is only sound while the skipped call would have
+    // produced the same answer as an unclaimed content type, so pin the two
+    // against each other rather than trusting the comment.
+    it("should leave the body undefined both when no Content-Type is declared and when it is unclaimed", async () => {
+      const seen: Array<{ declared: string | null; body: unknown }> = [];
+      adapter.post("/body", (req, res) => {
+        seen.push({ declared: req.get("content-type") ?? null, body: req.body });
+        res.send("ok");
+      });
+
+      await adapter.listen(0);
+
+      // `fetch` infers a Content-Type from most body types, so send raw bytes
+      // with the header explicitly stripped to get a genuinely undeclared body.
+      await fetch(`${baseUrl()}/body`, {
+        method: "POST",
+        headers: { "Content-Type": "" },
+        body: new Uint8Array([1, 2, 3]),
+      });
+      await fetch(`${baseUrl()}/body`, {
+        method: "POST",
+        headers: { "Content-Type": "application/octet-stream" },
+        body: new Uint8Array([1, 2, 3]),
+      });
+
+      expect(seen).toHaveLength(2);
+      expect(seen[0].declared).toBeFalsy();
+      expect(seen[0].body).toBeUndefined();
+      expect(seen[1].declared).toBe("application/octet-stream");
+      expect(seen[1].body).toBeUndefined();
     });
   });
 
@@ -418,6 +488,37 @@ describe("BunAdapter", () => {
       expect(middleware2).toHaveBeenCalled();
     });
 
+    // `use(fn)` and `use([fn])` both worked, but the path branch used to check
+    // only `typeof args[i] === "function"`, so an array argument was dropped
+    // and `use("/api", [mw])` silently registered nothing.
+    it("should handle an array of middleware behind a path", async () => {
+      const middleware1 = vi.fn((req, res, next) => next());
+      const middleware2 = vi.fn((req, res, next) => next());
+
+      adapter.use("/api", [middleware1, middleware2]);
+      adapter.get("/api/test", (req, res) => res.send("ok"));
+
+      await adapter.listen(0);
+      const server = adapter.getHttpServer().server;
+      await fetch(`http://localhost:${server?.port}/api/test`);
+
+      expect(middleware1).toHaveBeenCalled();
+      expect(middleware2).toHaveBeenCalled();
+    });
+
+    it("should not run path-scoped array middleware for a non-matching path", async () => {
+      const scoped = vi.fn((req, res, next) => next());
+
+      adapter.use("/api", [scoped]);
+      adapter.get("/other", (req, res) => res.send("ok"));
+
+      await adapter.listen(0);
+      const server = adapter.getHttpServer().server;
+      await fetch(`http://localhost:${server?.port}/other`);
+
+      expect(scoped).not.toHaveBeenCalled();
+    });
+
     it("should handle multiple middleware in use call", async () => {
       const middleware1 = vi.fn((req, res, next) => next());
       const middleware2 = vi.fn((req, res, next) => next());
@@ -450,6 +551,79 @@ describe("BunAdapter", () => {
   });
 
   describe("CORS", () => {
+    // NestJS declares `enableCors(options?: any)` and does not narrow
+    // `NestApplicationOptions["cors"]`, so these shapes reach the adapter with
+    // no compile error via `NestBunFactory.create(App, { cors })`. Rendered as
+    // a header value they produce a garbage origin or a 500 per request, so the
+    // rejection has to be a runtime one.
+    it("should reject a RegExp origin at configuration time", () => {
+      expect(() => adapter.enableCors({ origin: /^https:\/\/.*\.example\.com$/ } as never)).toThrow(
+        /must be a string, an array of strings, or a boolean/
+      );
+    });
+
+    it("should reject a callback origin at configuration time", () => {
+      expect(() =>
+        adapter.enableCors({ origin: (_o: string, cb: (e: null, ok: boolean) => void) => cb(null, true) } as never)
+      ).toThrow(/Received a callback/);
+    });
+
+    // An empty allow-list is the natural result of an unset env var. Falling
+    // back to the first entry made it `*`, so an unconfigured deployment
+    // allowed every caller.
+    it("should grant no origin for an empty allow-list", async () => {
+      adapter.enableCors({ origin: [] });
+      adapter.get("/test", (req, res) => res.send("ok"));
+
+      await adapter.listen(0);
+      const response = await fetch(`${baseUrl()}/test`, {
+        headers: { Origin: "https://evil.test" },
+      });
+
+      expect(response.headers.get("Access-Control-Allow-Origin")).toBeNull();
+    });
+
+    it("should grant no origin when the request origin is not in the allow-list", async () => {
+      adapter.enableCors({ origin: ["https://good.test"] });
+      adapter.get("/test", (req, res) => res.send("ok"));
+
+      await adapter.listen(0);
+      const response = await fetch(`${baseUrl()}/test`, {
+        headers: { Origin: "https://evil.test" },
+      });
+
+      expect(response.headers.get("Access-Control-Allow-Origin")).toBeNull();
+    });
+
+    // A response whose granted origin depends on the request must not be cached
+    // under a key that ignores it, or a shared cache serves one origin's grant
+    // to another.
+    it("should set Vary: Origin only when the granted origin depends on the request", async () => {
+      adapter.enableCors({ origin: true });
+      adapter.get("/test", (req, res) => res.send("ok"));
+
+      await adapter.listen(0);
+      const varying = await fetch(`${baseUrl()}/test`, {
+        headers: { Origin: "https://a.test" },
+      });
+
+      expect(varying.headers.get("Vary")).toBe("Origin");
+      expect(varying.headers.get("Access-Control-Allow-Origin")).toBe("https://a.test");
+    });
+
+    it("should not set Vary for a static string origin", async () => {
+      adapter.enableCors({ origin: "https://only.test" });
+      adapter.get("/test", (req, res) => res.send("ok"));
+
+      await adapter.listen(0);
+      const response = await fetch(`${baseUrl()}/test`, {
+        headers: { Origin: "https://a.test" },
+      });
+
+      expect(response.headers.get("Vary")).toBeNull();
+      expect(response.headers.get("Access-Control-Allow-Origin")).toBe("https://only.test");
+    });
+
     it("should enable CORS with default options", async () => {
       adapter.enableCors();
       adapter.get("/test", (req, res) => res.send("ok"));
@@ -500,10 +674,12 @@ describe("BunAdapter", () => {
       expect(response.headers.get("Access-Control-Allow-Origin")).toBe("https://example.com");
     });
 
-    it("should handle CORS with origin function", async () => {
-      adapter.enableCors({
-        origin: (origin, callback) => callback(null, true),
-      });
+    // `origin: true` echoes the request origin. This used to be spelled as a
+    // callback too, but the shim never read the callback's verdict, so a deny
+    // (`callback(null, false)`) was silently served as an allow. The callback
+    // form is gone from the signature; this covers the behaviour that remains.
+    it("should echo the request origin when origin is true", async () => {
+      adapter.enableCors({ origin: true });
       adapter.get("/test", (req, res) => res.send("ok"));
 
       await adapter.listen(0);
@@ -513,6 +689,22 @@ describe("BunAdapter", () => {
       });
 
       expect(response.headers.get("Access-Control-Allow-Origin")).toBe("https://example.com");
+    });
+
+    // `origin: false` resolves to the empty string, and an empty header value
+    // does not reach the client — so the caller is granted no origin at all,
+    // which is the point of the setting.
+    it("should grant no allow-origin when origin is false", async () => {
+      adapter.enableCors({ origin: false });
+      adapter.get("/test", (req, res) => res.send("ok"));
+
+      await adapter.listen(0);
+      const server = adapter.getHttpServer().server;
+      const response = await fetch(`http://localhost:${server?.port}/test`, {
+        headers: { Origin: "https://example.com" },
+      });
+
+      expect(response.headers.get("Access-Control-Allow-Origin")).toBeNull();
     });
 
     it("should handle CORS preflight", async () => {
@@ -945,24 +1137,201 @@ describe("BunAdapter", () => {
     });
 
     /** Serve `assetsRoot`, start listening, and return the base URL. */
-    const serveAssets = async (options?: { prefix?: string }): Promise<string> => {
+    const serveAssets = async (options?: {
+      prefix?: string;
+      transfer?: "stream" | "sendfile";
+    }): Promise<string> => {
       adapter.useStaticAssets(assetsRoot, options);
       await adapter.listen(0);
       return baseUrl();
     };
 
-    it("should serve a file from the static root", async () => {
+    // Everything in here must hold identically whichever way the bytes are
+    // transferred; the two modes differ only in framing and in whether the
+    // symlink TOCTOU is closed, both covered separately below.
+    describe.each(["stream", "sendfile"] as const)("transfer: %s", (transfer) => {
+      it("should serve a file from the static root", async () => {
+        const base = await serveAssets({ transfer });
+
+        const response = await fetch(`${base}/test.txt`);
+
+        expect(response.status).toBe(200);
+        expect(await response.text()).toBe("Hello from static file");
+        expect(response.headers.get("X-Content-Type-Options")).toBe("nosniff");
+      });
+
+      it("should refuse a dotfile", async () => {
+        const base = await serveAssets({ transfer });
+
+        const response = await fetch(`${base}/.gitignore`);
+
+        expect(response.status).toBe(404);
+        expect(await response.text()).not.toContain(DOTFILE_SECRET);
+      });
+
+      it("should refuse a traversal outside the root", async () => {
+        const base = await serveAssets({ transfer });
+
+        const response = await fetch(`${base}/../assets-evil/secret`);
+
+        expect(response.status).toBe(404);
+        expect(await response.text()).not.toContain(SIBLING_SECRET);
+      });
+
+      it("should refuse a symlink that escapes the root", async () => {
+        writeFileSync(join(tempRoot, "outside.txt"), SIBLING_SECRET);
+        symlinkSync(join(tempRoot, "outside.txt"), join(assetsRoot, "escape.txt"));
+        const base = await serveAssets({ transfer });
+
+        const response = await fetch(`${base}/escape.txt`);
+
+        expect(response.status).toBe(404);
+        expect(await response.text()).not.toContain(SIBLING_SECRET);
+      });
+
+      it("should follow a symlink whose target is inside the root", async () => {
+        symlinkSync(join(assetsRoot, "test.txt"), join(assetsRoot, "linked.txt"));
+        const base = await serveAssets({ transfer });
+
+        const response = await fetch(`${base}/linked.txt`);
+
+        expect(response.status).toBe(200);
+        expect(await response.text()).toBe("Hello from static file");
+      });
+
+      it("should serve a large file intact", async () => {
+        const size = 4 * 1024 * 1024;
+        writeFileSync(join(assetsRoot, "big.bin"), "x".repeat(size));
+        const base = await serveAssets({ transfer });
+
+        const response = await fetch(`${base}/big.bin`);
+
+        expect(response.status).toBe(200);
+        expect((await response.text()).length).toBe(size);
+      });
+
+      it("should not leak a file descriptor per request", async () => {
+        const base = await serveAssets({ transfer });
+        const openFds = (): number => readdirSync("/proc/self/fd").length;
+
+        await fetch(`${base}/test.txt`).then((r) => r.text());
+        const before = openFds();
+        for (let i = 0; i < 40; i++) {
+          await fetch(`${base}/test.txt`).then((r) => r.text());
+        }
+
+        expect(openFds()).toBeLessThan(before + 10);
+      });
+    });
+
+    // The two documented differences between the modes.
+    it("should frame a streamed GET as chunked, without Content-Length", async () => {
+      const base = await serveAssets({ transfer: "stream" });
+
+      const response = await fetch(`${base}/test.txt`);
+
+      expect(response.headers.get("Transfer-Encoding")).toBe("chunked");
+      expect(response.headers.get("Content-Length")).toBeNull();
+    });
+
+    it("should report Content-Length for a sendfile GET", async () => {
+      const base = await serveAssets({ transfer: "sendfile" });
+
+      const response = await fetch(`${base}/test.txt`);
+
+      expect(response.headers.get("Content-Length")).toBe("22");
+      expect(response.headers.get("Transfer-Encoding")).toBeNull();
+    });
+
+    it("should default to the stream transfer", async () => {
       const base = await serveAssets();
 
       const response = await fetch(`${base}/test.txt`);
 
-      expect(response.status).toBe(200);
-      expect(await response.text()).toBe("Hello from static file");
-      // Static content is attacker-influenced wherever users can populate the
-      // root, so MIME sniffing must be refused.
-      expect(response.headers.get("X-Content-Type-Options")).toBe("nosniff");
+      expect(response.headers.get("Transfer-Encoding")).toBe("chunked");
     });
 
+    // The reason the two modes exist. Drives the strategies directly with a
+    // path that has become a symlink *after* containment was checked - which is
+    // what a writer inside the root wins by racing the gap between the check
+    // and the open. `stream` opens with O_NOFOLLOW and refuses; `sendfile` has
+    // no descriptor to bind and serves whatever the path now points at.
+    describe("symlink TOCTOU", () => {
+      const swapAfterCheck = async (
+        strategy: "stream" | "sendfile"
+      ): Promise<{ nexted: boolean; body: string | null }> => {
+        writeFileSync(join(tempRoot, "secret.txt"), SIBLING_SECRET);
+        const swapped = join(assetsRoot, "swapped.txt");
+        symlinkSync(join(tempRoot, "secret.txt"), swapped);
+
+        const sent: unknown[] = [];
+        const res = {
+          type: () => res,
+          set: () => res,
+          end: () => sent.push(null),
+          send: (b: unknown) => sent.push(b),
+        };
+        let nexted = false;
+        const next = (): void => {
+          nexted = true;
+        };
+
+        const statics = BunAdapter as unknown as Record<string, (...args: unknown[]) => Promise<void>>;
+        if (strategy === "stream") {
+          await statics.sendStaticByDescriptor.call(
+            BunAdapter,
+            swapped,
+            "text/plain",
+            { method: "GET" },
+            res,
+            next
+          );
+        } else {
+          await statics.sendStaticByPath.call(BunAdapter, swapped, "text/plain", res, next);
+        }
+
+        let body: string | null = null;
+        for (const b of sent) {
+          if (b && typeof (b as Blob).text === "function") body = await (b as Blob).text();
+        }
+        return { nexted, body };
+      };
+
+      it("stream refuses a target swapped to a symlink after the check", async () => {
+        const { nexted, body } = await swapAfterCheck("stream");
+
+        expect(nexted).toBe(true);
+        expect(body).toBeNull();
+      });
+
+      it("sendfile serves it, which is the trade this mode accepts", async () => {
+        const { nexted, body } = await swapAfterCheck("sendfile");
+
+        expect(nexted).toBe(false);
+        expect(body).toBe(SIBLING_SECRET);
+      });
+    });
+
+    // HEAD sends no body, so the descriptor is released without streaming and
+    // the size is reported outright - Content-Length survives in both modes.
+    it("should answer HEAD for a static file without a body", async () => {
+      const base = await serveAssets();
+
+      const response = await fetch(`${base}/test.txt`, { method: "HEAD" });
+
+      expect(response.status).toBe(200);
+      expect(response.headers.get("Content-Length")).toBe("22");
+      expect(await response.text()).toBe("");
+    });
+
+    it("should not serve a directory", async () => {
+      mkdirSync(join(assetsRoot, "sub"));
+      const base = await serveAssets();
+
+      const response = await fetch(`${base}/sub`);
+
+      expect(response.status).toBe(404);
+    });
     it("should serve a file under a configured prefix", async () => {
       const base = await serveAssets({ prefix: "/static" });
 
@@ -1221,6 +1590,225 @@ describe("BunAdapter", () => {
     });
   });
 
+  // The adapter skips the whole Fastify request/reply pair while no hook,
+  // plugin or decorator is registered. That predicate must be re-read at each
+  // hook stage rather than sampled once per request: the stages run after body
+  // parsing and after the entire Express middleware chain, so a hook registered
+  // inside that window still applies to the request it lands in. Sampling once
+  // turned a late-registered onRequest auth hook into a silent bypass that also
+  // skipped onResponse, so it left no access-log entry either.
+  describe("Fastify surface registered mid-request", () => {
+    it("should reject a request whose onRequest auth hook is registered while its body is still arriving", async () => {
+      const handler = vi.fn((req: ExpressRequest, res: ExpressResponse) =>
+        res.send("HANDLER RAN - no auth")
+      );
+      adapter.post("/guarded", handler);
+      await adapter.listen(0);
+
+      // A body delivered in two chunks parks the adapter inside
+      // `parseRequestBody` - before the onRequest gate - until the second chunk
+      // lands. That window is attacker-controlled and bounded only by
+      // `middlewareTimeout`, so a hook registered inside it must still run.
+      let release!: () => void;
+      const secondChunk = new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      const body = new ReadableStream<Uint8Array>({
+        async start(controller) {
+          controller.enqueue(new TextEncoder().encode('{"a":'));
+          await secondChunk;
+          controller.enqueue(new TextEncoder().encode("1}"));
+          controller.close();
+        },
+      });
+
+      const inFlight = fetch(`${baseUrl()}/guarded`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body,
+        duplex: "half",
+      } as RequestInit & { duplex: "half" });
+
+      // Land inside the window, then let the request complete.
+      await new Promise((resolve) => setTimeout(resolve, 40));
+      adapter.addHook("onRequest", (req, reply, done) => {
+        reply.code(401).send({ error: "denied" });
+        done();
+      });
+      release();
+
+      const response = await inFlight;
+
+      expect(response.status).toBe(401);
+      expect(await response.json()).toEqual({ error: "denied" });
+      expect(handler).not.toHaveBeenCalled();
+    });
+
+    it("should apply a preHandler auth hook registered by an Express middleware to that same request", async () => {
+      // Deterministic, not a race: the middleware chain runs strictly between
+      // the onRequest and preHandler gates, so a hook it registers is always
+      // inside the window.
+      adapter.use((req: ExpressRequest, res: ExpressResponse, next: (err?: unknown) => void) => {
+        adapter.addHook("preHandler", (hookReq, reply, done) => {
+          reply.code(401).send({ error: "denied" });
+          done();
+        });
+        next();
+      });
+      const handler = vi.fn((req: ExpressRequest, res: ExpressResponse) =>
+        res.send("HANDLER RAN - no auth")
+      );
+      adapter.get("/guarded", handler);
+
+      await adapter.listen(0);
+      const response = await fetch(`${baseUrl()}/guarded`);
+
+      expect(response.status).toBe(401);
+      expect(await response.json()).toEqual({ error: "denied" });
+      expect(handler).not.toHaveBeenCalled();
+    });
+
+    it("should run an onResponse hook registered while the request is still in flight", async () => {
+      const observed: number[] = [];
+      adapter.get("/slow", async (req: ExpressRequest, res: ExpressResponse) => {
+        await new Promise((resolve) => setTimeout(resolve, 200));
+        res.status(201).send("done");
+      });
+
+      await adapter.listen(0);
+      const inFlight = fetch(`${baseUrl()}/slow`);
+
+      await new Promise((resolve) => setTimeout(resolve, 40));
+      adapter.addHook("onResponse", (req, reply, done) => {
+        observed.push(reply.statusCode);
+        done();
+      });
+
+      const response = await inFlight;
+
+      expect(response.status).toBe(201);
+      // The real status, not the reply's default 200: `finalize` publishes it
+      // before observers read it.
+      expect(observed).toEqual([201]);
+    });
+
+    it("should build no Fastify request for an app that never touches the Fastify surface", async () => {
+      // `applyRequestDecorators` runs exactly once per Fastify context and
+      // nowhere else, so it stands in for "was the pair constructed?". Without
+      // this the optimisation is unpinned: hard-coding the predicate to `true`
+      // keeps the rest of the suite green.
+      const built = vi.spyOn(FastifyPluginRegistry.prototype, "applyRequestDecorators");
+      try {
+        adapter.get("/plain", (req, res) => res.send("ok"));
+        await adapter.listen(0);
+
+        expect((await fetch(`${baseUrl()}/plain`)).status).toBe(200);
+        expect(built).not.toHaveBeenCalled();
+
+        adapter.addHook("onResponse", (req, reply, done) => done());
+
+        expect((await fetch(`${baseUrl()}/plain`)).status).toBe(200);
+        expect(built).toHaveBeenCalled();
+      } finally {
+        built.mockRestore();
+      }
+    });
+  });
+
+  // `finalize` publishes the real status onto the Fastify reply and then runs
+  // onResponse. Every hook-observable exit routes through it, so the standard
+  // access-log / latency-histogram idiom sees failures and short-circuits too -
+  // previously every error exit skipped onResponse entirely, so a 500 or a 401
+  // left no trace at all.
+  describe("onResponse observes every exit", () => {
+    /** Register an onResponse recorder and return the statuses it saw. */
+    const recordResponses = (): number[] => {
+      const seen: number[] = [];
+      adapter.addHook("onResponse", (req, reply, done) => {
+        seen.push(reply.statusCode);
+        done();
+      });
+      return seen;
+    };
+
+    it("should report the status of a Response returned straight from the handler", async () => {
+      const seen = recordResponses();
+      adapter.get("/raw", () => new Response("unavailable", { status: 503 }));
+
+      await adapter.listen(0);
+      const response = await fetch(`${baseUrl()}/raw`);
+
+      expect(response.status).toBe(503);
+      // Not 200: the handler-supplied Response bypasses the Express response,
+      // so its status has to be published onto the reply explicitly.
+      expect(seen).toEqual([503]);
+    });
+
+    it("should report a handler throw", async () => {
+      const seen = recordResponses();
+      adapter.get("/boom", () => {
+        throw new Error("handler exploded");
+      });
+
+      await adapter.listen(0);
+      const response = await fetch(`${baseUrl()}/boom`);
+
+      expect(response.status).toBe(500);
+      expect(seen).toEqual([500]);
+    });
+
+    it("should report an Express middleware failure, and tell onError about it", async () => {
+      const seen = recordResponses();
+      const reported: string[] = [];
+      adapter.addHook("onError", (req, reply, error, done) => {
+        reported.push(error.message);
+        done();
+      });
+      adapter.use((req: ExpressRequest, res: ExpressResponse, next: (err?: unknown) => void) => {
+        next(new Error("middleware exploded"));
+      });
+      adapter.get("/mw", (req, res) => res.send("unreachable"));
+
+      await adapter.listen(0);
+      const response = await fetch(`${baseUrl()}/mw`);
+
+      expect(response.status).toBe(500);
+      expect(seen).toEqual([500]);
+      // An Express middleware failure is a request failure; a Fastify onError
+      // reporter has to learn about it just as it does for a handler throw.
+      expect(reported).toEqual(["middleware exploded"]);
+    });
+
+    it("should report an onRequest short-circuit", async () => {
+      const seen = recordResponses();
+      adapter.addHook("onRequest", (req, reply, done) => {
+        reply.code(401).send({ error: "denied" });
+        done();
+      });
+      adapter.get("/guarded", (req, res) => res.send("unreachable"));
+
+      await adapter.listen(0);
+      const response = await fetch(`${baseUrl()}/guarded`);
+
+      expect(response.status).toBe(401);
+      expect(seen).toEqual([401]);
+    });
+
+    it("should report a response ended by an Express middleware", async () => {
+      const seen = recordResponses();
+      adapter.use((req: ExpressRequest, res: ExpressResponse) => {
+        res.status(418).send("teapot");
+      });
+      adapter.get("/short", (req, res) => res.send("unreachable"));
+
+      await adapter.listen(0);
+      const response = await fetch(`${baseUrl()}/short`);
+
+      expect(response.status).toBe(418);
+      expect(seen).toEqual([418]);
+    });
+  });
+
   describe("error middleware chain", () => {
     it("should pass error to next error handler", async () => {
       const firstHandler = vi.fn((err, req, res, next) => {
@@ -1256,6 +1844,24 @@ describe("BunAdapter", () => {
       const response = await fetch(`http://localhost:${server?.port}/test`);
 
       expect(response.status).toBe(500);
+    });
+  });
+
+  describe("setServerOptions validation", () => {
+    // `trustProxy` is typed `boolean`, but it is a security control and the type
+    // is not the only way in - JS callers and env/JSON-derived config reach here
+    // unchecked. Express's numeric hop count is the likely mistake, and the only
+    // thing this adapter could do with a number is degrade it to "trust the
+    // left-most entry", which is what a hop count exists to prevent.
+    it("should reject a numeric trustProxy rather than silently ignoring it", () => {
+      expect(() => adapter.setServerOptions({ trustProxy: 1 } as never)).toThrow(
+        /trustProxy must be a boolean/
+      );
+    });
+
+    it("should accept a boolean trustProxy", () => {
+      expect(() => adapter.setServerOptions({ trustProxy: true })).not.toThrow();
+      expect(() => adapter.setServerOptions({ trustProxy: false })).not.toThrow();
     });
   });
 
@@ -1740,6 +2346,125 @@ describe("BunAdapter", () => {
 
       expect(seen[0]).toEqual({ id: "42" });
       expect(seen[1]).toEqual({ slug: "42" });
+    });
+
+    // Routes are pre-bucketed by method and walked in registration order; a
+    // route with no parameters is matched by string comparison rather than by
+    // regex. Registration order is what a declining handler falls through in,
+    // so a static route and a parameterised route that both match the same path
+    // must still be tried in the order they were registered - in both orders,
+    // since the two take different arms of the match loop.
+    it("should keep registration order when a parameterised route precedes a static one", async () => {
+      const order: string[] = [];
+      adapter.get("/order/:id", (req, res, next) => {
+        order.push(`param:${req.params.id}`);
+        next();
+      });
+      adapter.get("/order/fixed", (req, res) => {
+        order.push("static");
+        res.send("static");
+      });
+
+      await adapter.listen(0);
+      const response = await fetch(`${baseUrl()}/order/fixed`);
+
+      expect(order).toEqual(["param:fixed", "static"]);
+      expect(await response.text()).toBe("static");
+    });
+
+    it("should keep registration order when a static route precedes a parameterised one", async () => {
+      const order: string[] = [];
+      adapter.get("/order/fixed", (req, res, next) => {
+        order.push("static");
+        next();
+      });
+      adapter.get("/order/:id", (req, res) => {
+        order.push(`param:${req.params.id}`);
+        res.send("param");
+      });
+
+      await adapter.listen(0);
+      const response = await fetch(`${baseUrl()}/order/fixed`);
+
+      expect(order).toEqual(["static", "param:fixed"]);
+      expect(await response.text()).toBe("param");
+    });
+
+    it("should fall through between two static routes registered on the same path", async () => {
+      const order: string[] = [];
+      adapter.get("/twice", (req, res, next) => {
+        order.push("first");
+        next();
+      });
+      adapter.get("/twice", (req, res) => {
+        order.push("second");
+        res.send("second");
+      });
+
+      await adapter.listen(0);
+      const response = await fetch(`${baseUrl()}/twice`);
+
+      expect(order).toEqual(["first", "second"]);
+      expect(await response.text()).toBe("second");
+    });
+
+    it("should still tolerate a trailing slash on a static route", async () => {
+      adapter.get("/trailing", (req, res) => res.send("matched"));
+
+      await adapter.listen(0);
+      const response = await fetch(`${baseUrl()}/trailing/`);
+
+      expect(response.status).toBe(200);
+      expect(await response.text()).toBe("matched");
+    });
+
+    // A parameterised sibling forces the match loop to test both arms, so the
+    // static route's trailing-slash form has to be recognised by the string
+    // comparison itself. Dropping `|| pathname === staticPaths[1]` still answers
+    // 200 here - from the WRONG handler, because "/order/:id" swallows the
+    // request with id="fixed" - so assert which handler replied, not the status.
+    it("should answer a trailing slash from the static handler, not a parameterised sibling", async () => {
+      const order: string[] = [];
+      adapter.get("/order/fixed", (req, res) => {
+        order.push("static");
+        res.send("static");
+      });
+      adapter.get("/order/:id", (req, res) => {
+        order.push(`param:${req.params.id}`);
+        res.send("param");
+      });
+
+      await adapter.listen(0);
+      const response = await fetch(`${baseUrl()}/order/fixed/`);
+
+      expect(response.status).toBe(200);
+      expect(order).toEqual(["static"]);
+      expect(await response.text()).toBe("static");
+    });
+
+    it("should answer an unregistered verb from an all() route", async () => {
+      adapter.get("/verbs", (req, res) => res.send("get"));
+      adapter.all("/verbs", (req, res) => res.send("all"));
+
+      await adapter.listen(0);
+      const response = await fetch(`${baseUrl()}/verbs`, { method: "DELETE" });
+
+      expect(response.status).toBe(200);
+      expect(await response.text()).toBe("all");
+    });
+
+    it("should pick up a route registered after an earlier request was served", async () => {
+      adapter.get("/first", (req, res) => res.send("first"));
+
+      await adapter.listen(0);
+      expect(await (await fetch(`${baseUrl()}/first`)).text()).toBe("first");
+      expect((await fetch(`${baseUrl()}/late`)).status).toBe(404);
+
+      adapter.get("/late", (req, res) => res.send("late"));
+
+      const response = await fetch(`${baseUrl()}/late`);
+      expect(response.status).toBe(200);
+      expect(await response.text()).toBe("late");
     });
 
     it("should 404 - not empty-200 - when every matching handler declines", async () => {

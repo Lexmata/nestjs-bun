@@ -6,6 +6,7 @@
  */
 
 import { Logger } from "@nestjs/common";
+import { setOwn } from "./utils/request";
 
 /** Shared logger so warnings honour the app's log level and structured output. */
 const logger = new Logger("ExpressCompat");
@@ -249,9 +250,8 @@ const MIME_TYPES: Record<string, string> = {
 /**
  * Statuses that must never carry a body (per the Fetch/HTTP specs).
  *
- * NOTE: this constant is duplicated in `src/fastify-compat.ts` and
- * `src/utils/response.ts`, and those two copies currently omit `101`. Any fix
- * to the set needs to land in all three places until they are consolidated.
+ * NOTE: duplicated verbatim in `src/fastify-compat.ts`, `src/bun-adapter.ts`
+ * and `src/utils/response.ts`. Any change to the set must land in all four.
  */
 const NULL_BODY_STATUSES = new Set([101, 204, 205, 304]);
 
@@ -293,6 +293,30 @@ function byteLength(value: string): number {
   return Buffer.byteLength(value);
 }
 
+/**
+ * Reject a pre-parsed URL that does not describe the request it is passed with.
+ *
+ * `parsedUrl` becomes the only source of the request's path, query and host, so
+ * an unrelated (or "helpfully normalised") URL is a parser-confusion primitive:
+ * middleware would authorise one path while the router matched another.
+ *
+ * The fast path is a single string comparison — `bunRequest.url` is already a
+ * serialised WHATWG URL, so re-parsing it is idempotent and `href` matches
+ * exactly. The re-parse is reached only by absolute-form request targets
+ * (`GET http://host/a/../b HTTP/1.1`), which Bun surfaces on `request.url`
+ * un-normalised; there `new URL(...).href` is the other legitimate spelling of
+ * the same URL. Measured on Bun 1.x the comparison costs ~21ns against ~495ns
+ * for the `new URL()` it replaces, so the optimisation survives the check.
+ *
+ * NOTE: deliberately duplicated in `src/fastify-compat.ts`. The two compat
+ * layers share no module by design; keep the two copies in step.
+ */
+function assertDescribesRequest(parsedUrl: URL, bunRequest: Request): void {
+  if (parsedUrl.href === bunRequest.url) return;
+  if (new URL(bunRequest.url).href === parsedUrl.href) return;
+  throw new TypeError("parsedUrl must describe bunRequest.url");
+}
+
 // ==================== Request ====================
 
 /**
@@ -303,14 +327,36 @@ function byteLength(value: string): number {
  * @param trustProxy - when `true`, `X-Forwarded-*` headers are honoured. Defaults to `false`
  *   because those headers are trivially spoofable when the server is directly reachable.
  * @param remoteAddress - the real peer address (e.g. `server.requestIP(req)?.address`)
+ * @param parsedUrl - an already-parsed `new URL(bunRequest.url)`. Purely an
+ *   optimisation for callers that have one in hand (the adapter parses the URL to
+ *   route the request); omit it and the URL is parsed here instead.
+ *
+ *   It **must describe `bunRequest.url`** and is checked: it is the sole source
+ *   of `url`, `originalUrl`, `path`, `query` and `hostname`, so a caller that
+ *   normalises the URL first (collapsing `//`, stripping a trailing `/`,
+ *   lower-casing) would make middleware read a different path from the one the
+ *   router matched. A URL that does not describe the request raises a
+ *   `TypeError` rather than yielding an incoherent request.
+ *
+ *   The instance is **retained, not copied**. `url`, `originalUrl` and `path`
+ *   are computed eagerly, but `hostname`, `protocol` and `query` are read from
+ *   it lazily, on first access. Mutating the URL between this call and that
+ *   first read therefore produces a request whose eager and lazy halves
+ *   disagree — do not mutate it after the call.
+ * @throws TypeError when `parsedUrl` does not describe `bunRequest.url`
  */
 export function createExpressRequest(
   bunRequest: Request,
   params: Record<string, string> = {},
   trustProxy = false,
-  remoteAddress?: string
+  remoteAddress?: string,
+  parsedUrl?: URL
 ): ExpressRequest {
-  const url = new URL(bunRequest.url);
+  if (parsedUrl !== undefined) {
+    assertDescribesRequest(parsedUrl, bunRequest);
+  }
+
+  const url = parsedUrl ?? new URL(bunRequest.url);
 
   // Lazily-computed, memoised state. Nothing below is parsed until it is read.
   let headersCache: Record<string, string | string[] | undefined> | undefined;
@@ -322,6 +368,7 @@ export function createExpressRequest(
   let protocolCache: string | undefined;
   let hostnameCache: string | undefined;
   let subdomainsCache: string[] | undefined;
+  let xhrCache: boolean | undefined;
 
   function forwardedFor(): string[] {
     if (forwardedForCache === undefined) {
@@ -339,29 +386,26 @@ export function createExpressRequest(
   function parseHeaders(): Record<string, string | string[] | undefined> {
     const result: Record<string, string | string[] | undefined> = {};
     bunRequest.headers.forEach((value, key) => {
-      const existing = result[key];
-      if (existing) {
-        result[key] = Array.isArray(existing) ? [...existing, value] : [existing, value];
-      } else {
-        result[key] = value;
+      if (!Object.hasOwn(result, key)) {
+        setOwn(result, key, value);
+        return;
       }
+      const existing = result[key];
+      setOwn(result, key, Array.isArray(existing) ? [...existing, value] : [existing as string, value]);
     });
     return result;
   }
 
   function parseQuery(): Record<string, string | string[]> {
     const result: Record<string, string | string[]> = {};
-    for (const key of new Set(url.searchParams.keys())) {
-      const values = url.searchParams.getAll(key);
-      if (values.length > 1) {
-        result[key] = values;
-        continue;
+    url.searchParams.forEach((value, key) => {
+      if (!Object.hasOwn(result, key)) {
+        setOwn(result, key, value);
+        return;
       }
-      const first = values[0];
-      // `getAll` on a key taken from `keys()` always yields at least one value
-      if (first === undefined) continue;
-      result[key] = first;
-    }
+      const existing = result[key];
+      setOwn(result, key, Array.isArray(existing) ? [...existing, value] : [existing as string, value]);
+    });
     return result;
   }
 
@@ -376,7 +420,10 @@ export function createExpressRequest(
       if (eq === -1) continue;
 
       const name = pair.slice(0, eq).trim();
-      if (!name || name in result) continue;
+      // `Object.hasOwn`, not `in`: `in` walks the prototype chain, so cookies
+      // named `constructor`, `toString`, `valueOf` or `hasOwnProperty` were
+      // treated as already-present and dropped before the first write.
+      if (!name || Object.hasOwn(result, name)) continue;
 
       let value = pair.slice(eq + 1).trim();
       if (value.length >= 2 && value.startsWith('"') && value.endsWith('"')) {
@@ -384,22 +431,27 @@ export function createExpressRequest(
       }
 
       try {
-        result[name] = decodeURIComponent(value);
+        setOwn(result, name, decodeURIComponent(value));
       } catch {
         // Malformed percent-escapes: fall back to the raw value like Express does
-        result[name] = value;
+        setOwn(result, name, value);
       }
     }
 
     return result;
   }
 
+  // Built once: `url` and `originalUrl` are the same string, and strings are
+  // primitives, so sharing the backing value is unobservable.
+  const pathname = url.pathname;
+  const fullUrl = pathname + url.search;
+
   const req: ExpressRequest = {
     raw: bunRequest,
     method: bunRequest.method,
-    url: url.pathname + url.search,
-    originalUrl: url.pathname + url.search,
-    path: url.pathname,
+    url: fullUrl,
+    originalUrl: fullUrl,
+    path: pathname,
     baseUrl: "",
 
     get hostname(): string {
@@ -407,7 +459,7 @@ export function createExpressRequest(
         const forwardedHost = trustProxy ? bunRequest.headers.get("x-forwarded-host") : null;
         if (forwardedHost) {
           // `split` on a non-empty string always yields a first element
-          const first = forwardedHost.split(",")[0] ?? forwardedHost;
+          const first = forwardedHost.split(",")[0];
           hostnameCache = first.trim().replace(/:\d+$/, "");
         } else {
           hostnameCache = url.hostname;
@@ -452,7 +504,7 @@ export function createExpressRequest(
         const forwardedProto = trustProxy ? bunRequest.headers.get("x-forwarded-proto") : null;
         if (forwardedProto) {
           // `split` on a non-empty string always yields a first element
-          const first = forwardedProto.split(",")[0] ?? forwardedProto;
+          const first = forwardedProto.split(",")[0];
           protocolCache = first.trim().toLowerCase();
         } else {
           protocolCache = url.protocol.replace(":", "");
@@ -479,7 +531,14 @@ export function createExpressRequest(
       subdomainsCache = value;
     },
 
-    xhr: bunRequest.headers.get("x-requested-with")?.toLowerCase() === "xmlhttprequest",
+    // Deferred like every other derived field; almost no handler reads it.
+    get xhr(): boolean {
+      xhrCache ??= bunRequest.headers.get("x-requested-with")?.toLowerCase() === "xmlhttprequest";
+      return xhrCache;
+    },
+    set xhr(value: boolean) {
+      xhrCache = value;
+    },
     params,
 
     get query(): Record<string, string | string[]> {
@@ -600,12 +659,17 @@ export function createExpressResponse(request?: ExpressRequest | Request): Expre
 
   // One-shot end notification. `endNotified` guards against a second emission
   // when both `markSent()` and the `_ended` setter run for the same response.
+  //
+  // Allocated on first subscription rather than per response: only middleware
+  // that returns without signalling ever subscribes, so an app with no Express
+  // middleware never needs the array at all.
   let endNotified = false;
-  const endListeners: Array<() => void> = [];
+  let endListeners: Array<() => void> | null = null;
 
   function notifyEnd(): void {
     if (endNotified) return;
     endNotified = true;
+    if (endListeners === null) return;
     // Drain before invoking so a listener that re-registers is not looped over
     const listeners = endListeners.splice(0, endListeners.length);
     for (const listener of listeners) {
@@ -966,7 +1030,7 @@ export function createExpressResponse(request?: ExpressRequest | Request): Expre
         listener();
         return;
       }
-      endListeners.push(listener);
+      (endListeners ??= []).push(listener);
     },
 
     _buildResponse(): Response {

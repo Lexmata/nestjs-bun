@@ -1,7 +1,16 @@
 type ResponseBody = string | ArrayBuffer | Uint8Array | ReadableStream | Blob | null;
 
-/** Status codes that must not carry a body — `new Response(body, { status })` throws for these. */
-const NULL_BODY_STATUSES: ReadonlySet<number> = new Set([204, 205, 304]);
+/**
+ * Status codes that must not carry a body — `new Response(body, { status })`
+ * throws for these.
+ *
+ * Duplicated in `express-compat.ts`, `fastify-compat.ts` and `bun-adapter.ts`;
+ * keep all four in step. `101` is a null-body status per the Fetch spec and was
+ * missing from this copy, so `error(message, 101)` returned a 101 carrying a
+ * JSON body. Bun's `Response` constructor is lenient about that; strict
+ * runtimes and intermediaries are not.
+ */
+const NULL_BODY_STATUSES: ReadonlySet<number> = new Set([101, 204, 205, 304]);
 
 /** The only status codes a redirect may use. */
 const REDIRECT_STATUSES: ReadonlySet<number> = new Set([301, 302, 303, 307, 308]);
