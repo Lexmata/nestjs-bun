@@ -1,10 +1,14 @@
 name: CI
 
+# `develop` is the git-flow integration branch, so it is where PRs actually
+# land - `main` only ever receives release merges. Gating on `main` alone meant
+# the suite first ran *after* review, when develop merged to main, and every PR
+# into develop merged with no automated verification at all.
 on:
   push:
-    branches: [main]
+    branches: [main, develop]
   pull_request:
-    branches: [main]
+    branches: [main, develop]
 
 # `pull_request` builds run attacker-authored TypeScript: `bun test` executes
 # the fork's test files, and `pnpm install` runs its lifecycle scripts. Without
