@@ -1,59 +1,78 @@
-# Docs
+# Documentation site
 
-This project was generated using [Angular CLI](https://github.com/angular/angular-cli) version 21.0.3.
+The documentation site for [`@lexmata/nestjs-platform-bun`](https://github.com/quinnjr/nestjs-bun) —
+a NestJS HTTP adapter that runs on Bun's native server.
+
+It is a standalone Angular 21 application with its own `package.json` and lockfile, so it is
+**not** part of the root workspace. Install and build it from this directory.
+
+## Prerequisites
+
+- Node.js 20+ — the Angular CLI toolchain runs on Node. The *adapter* requires Bun; building
+  these docs does not.
+- pnpm — the project pins `pnpm@10.26.2` via `packageManager`.
+
+## Setup
+
+```bash
+cd docs
+pnpm install
+```
 
 ## Development server
 
-To start a local development server, run:
-
 ```bash
-ng serve
+pnpm start
 ```
 
-Once the server is running, open your browser and navigate to `http://localhost:4200/`. The application will automatically reload whenever you modify any of the source files.
+Serves on <http://localhost:4200/> with hot reload.
 
-## Code scaffolding
-
-Angular CLI includes powerful code scaffolding tools. To generate a new component, run:
+## Build
 
 ```bash
-ng generate component component-name
+pnpm build
 ```
 
-For a complete list of available schematics (such as `components`, `directives`, or `pipes`), run:
+Emits the production bundle to `dist/`. This is what CI and any deploy step should run. It
+type-checks every component template, so it is also the fastest way to catch a broken binding.
 
 ```bash
-ng generate --help
+pnpm watch    # development build, rebuilding on change
 ```
 
-## Building
-
-To build the project run:
+## Tests
 
 ```bash
-ng build
+pnpm test
 ```
 
-This will compile your project and store the build artifacts in the `dist/` directory. By default, the production build optimizes your application for performance and speed.
+Runs unit tests under Vitest. There is no end-to-end suite — no e2e builder is configured, so
+`ng e2e` will fail.
 
-## Running unit tests
+## Structure
 
-To execute unit tests with the [Vitest](https://vitest.dev/) test runner, use the following command:
+| Path | Contents |
+| --- | --- |
+| `src/app/app.routes.ts` | Route table. Every page is lazily loaded. |
+| `src/app/components/layout.ts` | Shell: sidebar navigation, header, router outlet. |
+| `src/app/pages/` | One standalone component per documentation page, each with an inline template. |
+| `src/app/site.ts` | Project identity constants — repository URL, package name, copyright. |
+| `src/styles.css` | Tailwind 4 entry point and the `@theme` colour tokens. |
+| `src/index.html` | Document shell and page metadata. |
 
-```bash
-ng test
-```
+## Adding a page
 
-## Running end-to-end tests
+1. Add a standalone component under `src/app/pages/`.
+2. Register a lazy route for it in `src/app/app.routes.ts`.
+3. Add a nav entry to `navSections` in `src/app/components/layout.ts`.
+4. Run `pnpm build` to confirm the template compiles.
 
-For end-to-end (e2e) testing, run:
+## Editing guidance
 
-```bash
-ng e2e
-```
+These pages document the real behaviour of the adapter in `../src`. Before describing an
+option, method or middleware as supported, check it against the implementation — parts of the
+Express and Fastify compatibility layers are deliberately partial, and the pages call out what
+is unsupported. Keep those caveats accurate rather than aspirational.
 
-Angular CLI does not come with an end-to-end testing framework by default. You can choose one that suits your needs.
-
-## Additional Resources
-
-For more information on using the Angular CLI, including detailed command references, visit the [Angular CLI Overview and Command Reference](https://angular.dev/tools/cli) page.
+Repository URLs and the copyright line live in `src/app/site.ts`. Change them there rather than
+in individual templates, and keep them in sync with the root `package.json` and `LICENSE`.
