@@ -6,21 +6,36 @@ on:
   pull_request:
     branches: [main]
 
+# `pull_request` builds run attacker-authored TypeScript: `bun test` executes
+# the fork's test files, and `pnpm install` runs its lifecycle scripts. Without
+# an explicit block, GITHUB_TOKEN inherits the repository default, which on a
+# read/write repo is enough to push to main. Read-only is the only safe floor
+# here; grant more per-job, never at the top level.
+permissions:
+  contents: read
+
 jobs:
   test:
     runs-on: ubuntu-latest
 
     steps:
-      - uses: actions/checkout@v4
+      # Third-party and first-party actions alike are pinned to a commit SHA.
+      # A tag - even `v4` - is a mutable pointer the action's owner can move at
+      # any time, so a compromised or careless retag silently changes what runs
+      # against our GITHUB_TOKEN. The trailing comment records which release the
+      # SHA corresponded to when it was pinned; update both together.
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
 
-      - uses: pnpm/action-setup@v4
+      - uses: pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1 # v4.3.0
 
-      - uses: actions/setup-node@v4
+      # Node is still needed for the toolchain (pnpm, eslint, tsup, tsc).
+      # It is NOT used to run the tests.
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
           node-version: 22
           cache: 'pnpm'
 
-      - uses: oven-sh/setup-bun@v2
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
         with:
           bun-version: latest
 
@@ -30,42 +45,119 @@ jobs:
       - name: Lint
         run: pnpm lint
 
+      - name: Typecheck
+        run: pnpm typecheck
+
+      # The root tsconfig includes only src/, so `pnpm typecheck` above has
+      # never read test/ - ~2,250 lines of e2e that until recently also never
+      # ran. Typechecking it surfaces 48 errors in test/e2e/ (see
+      # tsconfig.test.json for the breakdown and the plan).
+      #
+      # `continue-on-error` on purpose, and TEMPORARILY: the errors are real and
+      # should be visible on every run, but making them blocking today would
+      # commit a knowingly-red required check, which is how reviewers learn to
+      # scroll past CI. Flip this to a hard gate - and fold the script back into
+      # `pnpm typecheck` - as soon as test/e2e/ is clean.
+      - name: Typecheck tests (non-blocking, see tsconfig.test.json)
+        run: pnpm typecheck:test
+        continue-on-error: true
+
       - name: Build
         run: pnpm build
 
-      - name: Unit tests
-        run: pnpm test:coverage
+      # The examples are the only consumer that imports the package *by name*
+      # (`"@lexmata/nestjs-platform-bun": "file:.."`), so they are the only
+      # thing that exercises the published `exports` map and the emitted
+      # `dist/index.d.ts` rather than `src/`. That makes this the de-facto
+      # contract test for what users actually install: the 0.1.0 `exports` map
+      # pointed at a `dist/index.mjs` that tsup never emitted, and nothing in
+      # CI noticed because nothing resolved the package by name.
+      #
+      # `examples/` is a separate pnpm project with its own lockfile and its own
+      # pnpm-workspace.yaml (needed to satisfy ERR_PNPM_IGNORED_BUILDS on
+      # pnpm >= 10.26), so it needs its own `pnpm install`. The script does the
+      # build + install + tsc itself; the repeated build is idempotent and keeps
+      # the local and CI invocations identical.
+      - name: Typecheck examples against the built package
+        run: pnpm typecheck:examples
 
-      - name: E2E tests
-        run: pnpm test:e2e:coverage
+      # `bun test` is the only runner that actually executes this package's
+      # suites. vitest workers always run under Node - `globalThis.Bun` is
+      # undefined and `process.versions.bun` reports "none" there regardless of
+      # how vitest is launched - so every Bun-gated suite (the adapter itself,
+      # and the entire e2e suite) silently skipped while vitest exited 0.
+      #
+      # Coverage thresholds come from bunfig.toml and are genuinely enforced:
+      # Bun exits 1 when the totals fall under `coverageThreshold`. Verified on
+      # Bun 1.3.14 - `bun test --coverage src/bun-adapter.test.ts` (50.47% funcs
+      # / 68.42% lines) exits 1, `bun test --coverage src/utils/` (97.50% /
+      # 100.00%) exits 0. Enforcement requires `--coverage`; a bare `bun test`
+      # measures nothing and gates nothing.
+      - name: Tests
+        run: bun test --coverage
 
   benchmark:
     runs-on: ubuntu-latest
     needs: test
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
 
-      - uses: pnpm/action-setup@v4
+      - uses: pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1 # v4.3.0
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
           node-version: 22
           cache: 'pnpm'
 
-      - uses: oven-sh/setup-bun@v2
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
         with:
           bun-version: latest
 
       - name: Install dependencies
         run: pnpm install
 
+      # The benchmark imports the package by name via the `file:..` link, so it
+      # measures the built artifact users install rather than untranspiled src/.
       - name: Build
         run: pnpm build
 
       - name: Install benchmark dependencies
         run: cd benchmark && pnpm install
 
-      - name: Verify Bun is faster
+      - name: Typecheck benchmark harness
+        run: cd benchmark && pnpm typecheck
+
+      # Reduced variant of the full suite in BENCHMARK.md: shorter runs, fewer
+      # connections, one measurement per endpoint - but all six endpoints, and
+      # every adapter must actually boot and return correct responses. A server
+      # that fails to start is a hard failure, never an absent baseline that
+      # makes the comparison vacuously true. That correctness half is kept at
+      # full strength and is not tunable.
+      #
+      # The speed half is a REGRESSION gate, not an aspiration. The defaults are
+      # 1.0x against both baselines, which the adapter does not currently meet:
+      # measured (BENCHMARK.md) it trails Fastify on all six endpoints and
+      # Express on four of six. Committing the 1.0x default would mean every PR
+      # goes red for a state we already know about, reviewers learn to ignore
+      # the job, and a real regression arrives invisibly. So the floors are set
+      # from the measured worst endpoint, minus a noise band.
+      #
+      # The gate is applied PER ENDPOINT, so the floor is the worst endpoint,
+      # not the aggregate:
+      #   Express  worst = GET /        18,115 / 22,104 = 0.82x
+      #   Fastify  worst = GET /health  17,434 / 72,822 = 0.24x
+      # BENCHMARK.md records run-to-run spread up to 66% on a non-idle host and
+      # advises treating anything under ~20% relative difference as noise, so
+      # each floor is the worst ratio less 20%: 0.82 -> 0.65, 0.24 -> 0.19.
+      #
+      # These numbers assert "no worse than 2026-07 measured, allowing for
+      # noise". Ratchet them UP as the adapter improves; a drop below them is a
+      # real finding. Never lower them to make a red run pass without first
+      # explaining, in BENCHMARK.md, what regressed and why it is acceptable.
+      - name: Verify Bun adapter performance
         run: cd benchmark && pnpm verify
-        timeout-minutes: 5
+        env:
+          VERIFY_MIN_RATIO_EXPRESS: '0.65'
+          VERIFY_MIN_RATIO_FASTIFY: '0.19'
+        timeout-minutes: 15

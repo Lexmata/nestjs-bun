@@ -1,0 +1,57 @@
+# Bun configuration for @lexmata/nestjs-platform-bun.
+#
+# This package targets the Bun runtime exclusively, so `bun test` is the only
+# test runner. It is not merely a preference: vitest workers always execute
+# under Node, where `globalThis.Bun` is undefined and `process.versions.bun`
+# reports "none" regardless of how vitest is launched. Every Bun-gated suite
+# (the adapter itself, and the whole e2e suite) is therefore skipped under
+# vitest while vitest still exits 0. `bun test` runs them for real, and
+# natively resolves the `vitest` imports in the existing test files to
+# `bun:test`.
+
+[test]
+# Test files are never counted towards their own coverage.
+coverageSkipTestFiles = true
+
+# Coverage thresholds. These are a floor under what the suite already achieves,
+# not an aspiration; run `bun test --coverage` to see the current headroom. No
+# figure is quoted here on purpose - a hard-coded percentage in a comment goes
+# stale on the next commit and then invites someone to "restore" the older,
+# lower number.
+#
+# THE KEYS MUST BE PLURAL. Bun 1.3.14 reads `lines`, `functions` and
+# `statements`; it silently ignores the singular `line`/`function`/`statement`
+# spellings, and an object containing only ignored keys enforces nothing while
+# still exiting 0. This file previously used the singular form, so the gate was
+# inert. Verified on Bun 1.3.14 against `bun test --coverage src/utils/`
+# (97.50% funcs / 100.00% lines):
+#
+#   { lines = 0.94, functions = 0.99 } -> exit 1   (plural: enforced)
+#   { line  = 0.99, function  = 0.99 } -> exit 0   (singular: ignored)
+#
+# Enforcement only happens when coverage is actually collected, i.e. under
+# `bun test --coverage`. That is what CI runs; a bare `bun test` neither
+# measures nor gates.
+#
+# What is measured: coverage counts only files that a test actually loads.
+# src/nest-bun-application.ts, src/index.ts and src/interfaces/** are never
+# imported by any test, so they are absent from the report entirely rather than
+# excluded from it - their uncovered lines do not drag the percentages down and
+# are not visible in them either. The files that do appear are
+# src/bun-adapter.ts, src/express-compat.ts, src/fastify-compat.ts,
+# src/utils/request.ts and src/utils/response.ts.
+#
+# Scope: the gate protects the PUBLISHED library. `benchmark/` is local tooling
+# that is never published (package.json `files` is ["dist"]), and parts of its
+# harness cannot be exercised from the root test job at all - `runAutocannon`
+# needs `benchmark/node_modules`, which CI's test job does not install, and
+# `stopServer`'s SIGKILL fallback costs 10s of suite time for two lines. Its own
+# 60 tests still run in `bun test`; only the per-file threshold is scoped out.
+# Note the glob: a bare "benchmark/" is silently ignored by Bun 1.3.14.
+coveragePathIgnorePatterns = ["benchmark/**"]
+
+# Bun applies these PER FILE, not just to the "All files" row, so one
+# under-covered file fails the run even when the total looks healthy.
+#
+# Raise these as coverage improves. Never lower them to make a run pass.
+coverageThreshold = { lines = 0.94, functions = 0.90 }
