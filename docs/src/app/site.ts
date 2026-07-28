@@ -9,7 +9,7 @@
  */
 
 /** GitHub org/repo slug — matches the project's git remote. */
-export const REPO_SLUG = 'quinnjr/nestjs-bun';
+export const REPO_SLUG = 'Lexmata/nestjs-bun';
 
 /** Canonical repository URL. */
 export const REPO_URL = `https://github.com/${REPO_SLUG}`;
