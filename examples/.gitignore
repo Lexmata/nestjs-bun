@@ -1,0 +1,4 @@
+node_modules/
+
+# Locally generated TLS material for 04-tls. Never commit certificates.
+*.pem

@@ -1,0 +1,26 @@
+{
+  "name": "nestjs-bun-examples",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Runnable examples for @lexmata/nestjs-platform-bun",
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "start:basic": "bun 01-basic/main.ts",
+    "start:express-middleware": "bun 02-express-middleware/main.ts",
+    "start:fastify-hooks": "bun 03-fastify-hooks/main.ts",
+    "start:tls": "bun 04-tls/main.ts",
+    "start:webhook": "bun 05-raw-body-webhook/main.ts"
+  },
+  "dependencies": {
+    "@lexmata/nestjs-platform-bun": "file:..",
+    "@nestjs/common": "^11.0.0",
+    "@nestjs/core": "^11.0.0",
+    "reflect-metadata": "^0.2.2",
+    "rxjs": "^7.8.1"
+  },
+  "devDependencies": {
+    "@types/bun": "^1.2.4",
+    "typescript": "^5.7.3"
+  }
+}

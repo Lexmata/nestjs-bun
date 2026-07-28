@@ -1,0 +1,7 @@
+# pnpm >= 10.26 fails `pnpm install` outright with ERR_PNPM_IGNORED_BUILDS unless
+# every dependency carrying a postinstall script is explicitly allowed or denied.
+# Without this file the examples' install step exits 1.
+#
+# @nestjs/core's script only prints a donation message.
+allowBuilds:
+  '@nestjs/core': false
