@@ -1,0 +1,10 @@
+# pnpm >= 10.26 fails `pnpm install` outright with ERR_PNPM_IGNORED_BUILDS
+# unless every dependency carrying a postinstall script is explicitly allowed or
+# denied. Without this file the benchmark's install step exits 1, which takes
+# the whole CI benchmark job down before a single request is measured.
+#
+# esbuild needs its script - it links the platform binary that tsx runs on.
+# @nestjs/core's script only prints a donation message.
+allowBuilds:
+  '@nestjs/core': false
+  esbuild: true
