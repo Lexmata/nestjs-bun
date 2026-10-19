@@ -46,7 +46,9 @@ pnpm watch    # development build, rebuilding on change
 pnpm test
 ```
 
-Runs unit tests under Vitest. There is no end-to-end suite — no e2e builder is configured, so
+Runs unit tests under Vitest. The one suite, `src/app/pages/fastify-compat.spec.ts`, checks the
+Fastify Compatibility page against the adapter's real hook list; `bun test` at the repository root
+runs it too, and that is the run CI gates on. There is no end-to-end suite — no e2e builder is configured, so
 `ng e2e` will fail.
 
 ## Structure

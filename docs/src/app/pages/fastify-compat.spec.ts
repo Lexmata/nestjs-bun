@@ -10,21 +10,28 @@
  * This test closes that loop by reading the page's own source and comparing the
  * names it renders against the exported {@link SUPPORTED_FASTIFY_HOOKS}.
  *
- * ## Why this file lives at `docs/`, not `docs/src/`
+ * ## Two runners
  *
- * `docs/tsconfig.app.json` includes `src/**\/*.ts` and excludes only
- * `src/**\/*.spec.ts`, so a `.test.ts` under `docs/src/` would be pulled into
- * `ng build` — where importing `bun:test` and a module outside the docs project
- * breaks the site build. Keeping it one level up puts it outside both
- * `tsconfig.app.json` and `tsconfig.spec.json` while leaving it inside the
- * default `bun test` glob at the repository root.
+ * As a `.spec.ts` under `docs/src/`, this file is excluded from `ng build` by
+ * `tsconfig.app.json` and picked up by `ng test` through `tsconfig.spec.json`.
+ * It is also inside the default `bun test` glob at the repository root, which
+ * is the only place CI runs it: CI never installs `docs/`.
+ *
+ * Under `ng test` it is compiled with the docs project's own tsconfig and no Bun
+ * or NestJS types, so it imports `src/fastify-hooks.ts` (which has no imports)
+ * rather than `src/fastify-compat.ts`.
  */
 
 import { describe, it, expect } from "vitest";
 import { readFileSync } from "node:fs";
-import { SUPPORTED_FASTIFY_HOOKS } from "../src/fastify-compat";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
+import { SUPPORTED_FASTIFY_HOOKS } from "../../../../src/fastify-hooks";
 
-const PAGE_PATH = new URL("./src/app/pages/fastify-compat.ts", import.meta.url);
+// Built with `node:path` rather than `new URL(..., import.meta.url)`: `ng test`
+// runs under jsdom, whose global `URL` resolves the relative reference to
+// something `readFileSync` and `fileURLToPath` both reject.
+const PAGE_PATH = join(dirname(fileURLToPath(import.meta.url)), "fastify-compat.ts");
 const page = readFileSync(PAGE_PATH, "utf8");
 
 /** Number words the page uses to state how many hooks exist. */

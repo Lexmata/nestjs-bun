@@ -9,6 +9,9 @@
 
 import { Logger } from "@nestjs/common";
 import { setOwn } from "./utils/request";
+import { SUPPORTED_FASTIFY_HOOKS, type FastifyHookName } from "./fastify-hooks";
+
+export { SUPPORTED_FASTIFY_HOOKS, type FastifyHookName };
 
 /** Shared logger so diagnostics honour the app's log level and structured output. */
 const logger = new Logger("FastifyCompat");
@@ -121,35 +124,6 @@ export interface FastifyReply {
   // Build final response
   _buildResponse(): Response;
 }
-
-/**
- * Fastify hook names supported by this adapter.
- *
- * Fastify itself also defines `preParsing`, `onTimeout`, `onClose`, `onReady`
- * and `onListen`; those have no meaningful execution stage here and
- * {@link FastifyHooksManager.addHook} throws when they are registered.
- */
-export type FastifyHookName =
-  | "onRequest"
-  | "preValidation"
-  | "preHandler"
-  | "preSerialization"
-  | "onSend"
-  | "onError"
-  | "onResponse";
-
-/**
- * Runtime list matching {@link FastifyHookName}.
- */
-export const SUPPORTED_FASTIFY_HOOKS: readonly FastifyHookName[] = [
-  "onRequest",
-  "preValidation",
-  "preHandler",
-  "preSerialization",
-  "onSend",
-  "onError",
-  "onResponse",
-] as const;
 
 export type FastifyOnRequestHook = (
   request: FastifyRequest,
