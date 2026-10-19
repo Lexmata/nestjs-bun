@@ -1,0 +1,8 @@
+# pnpm >= 10.26 fails `pnpm install` outright with ERR_PNPM_IGNORED_BUILDS
+# unless every dependency carrying a postinstall script is explicitly allowed or
+# denied.
+#
+# esbuild's script validates (and if needed fetches) its platform binary; tsup
+# needs that binary to build.
+allowBuilds:
+  esbuild: true

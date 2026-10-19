@@ -1,10 +1,11 @@
-import { Component } from '@angular/core';
+import { Component, ChangeDetectionStrategy } from '@angular/core';
 import { CommonModule } from '@angular/common';
 
 @Component({
   selector: 'app-migration',
   standalone: true,
   imports: [CommonModule],
+  changeDetection: ChangeDetectionStrategy.Eager,
   template: `
     <article class="max-w-4xl mx-auto px-6 py-12 animate-fade-in">
       <h1 class="text-4xl font-bold mb-4">Migration Guide</h1>
@@ -28,7 +29,7 @@ import { CommonModule } from '@angular/common';
           <div class="p-4 bg-bg-secondary rounded-lg border border-border">
             <h3 class="font-semibold text-text-primary mb-2">2. Verify NestJS Version</h3>
             <p class="text-text-secondary text-sm">
-              Ensure you're using NestJS 10.x or 11.x. Check your <code>package.json</code>.
+              Ensure you're using NestJS 10.x, 11.x or 12.x. Check your <code>package.json</code>.
             </p>
           </div>
         </div>

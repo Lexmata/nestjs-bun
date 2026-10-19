@@ -14,10 +14,13 @@
   // CommonJS on purpose: the sources use extensionless relative imports, which
   // Node's ESM resolver rejects. CJS keeps the emitted code runnable by both
   // runtimes without rewriting every import.
+  //
+  // `moduleResolution` is inherited (`bundler`) rather than set to `node`:
+  // TypeScript 7 removed `node`/`node10`, and since 6.0 `bundler` may be paired
+  // with `module: CommonJS`, which still resolves extensionless imports.
   "extends": "./tsconfig.json",
   "compilerOptions": {
     "module": "CommonJS",
-    "moduleResolution": "node",
     "noEmit": false,
     "outDir": "dist",
     "sourceMap": true

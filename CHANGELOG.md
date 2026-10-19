@@ -7,6 +7,41 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.5.0] - 2026-10-19
+
+Adds NestJS 12 to the supported peer range. No runtime behaviour changes:
+the adapter, both compat layers and the public API behave exactly as in 0.4.0.
+
+### Added
+
+- **NestJS 12 support.** The `@nestjs/common` and `@nestjs/core` peer range is
+  now `^10.0.0 || ^11.0.0 || ^12.0.0`. The test suite, the examples and the
+  benchmark gate all run against NestJS 12. The minor version moves because,
+  pre-1.0, a caret range on `0.4.x` would not otherwise reach a release that
+  takes a new peer major.
+
+### Changed
+
+- `SUPPORTED_FASTIFY_HOOKS` and `FastifyHookName` are defined in a new,
+  import-free `src/fastify-hooks.ts` and re-exported unchanged from the package
+  root, so the documentation site's tests can import the real list. Public API
+  unchanged.
+- Toolchain moved to current majors: TypeScript 7 for `tsc` (with the
+  TypeScript 6.0 API kept alongside for typescript-eslint and the `.d.ts`
+  build), ESLint 10, tsup 9, vitest 5 and commitlint 21. The published bundle
+  is still built with `minify`, `keepNames` and embedded sourcemaps.
+- pnpm 12 in every project, which enforces a one-day minimum release age on
+  every dependency it installs. CI uses `pnpm/action-setup` v6.1.0.
+- The documentation site moved to Angular 22, and its Fastify hook sync test
+  now runs under `ng test` as well as the root `bun test`.
+- `CLAUDE.md` became `AGENTS.md` (with `CLAUDE.md` importing it), and the
+  guidance was corrected: CI runs on `develop` as well as `main`.
+
+### Fixed
+
+- The documentation site displayed the version as `v0.2.0`; `docs/src/app/site.ts`
+  had not been bumped for 0.3.0 or 0.4.0. It now reads `v0.5.0`.
+
 ## [0.4.0] - 2026-07-28
 
 A packaging release. No runtime behaviour changes — the adapter, both compat
@@ -528,7 +563,8 @@ anyone who vendored the source or installed from git.
   (default 30000 ms) so a middleware that never calls `next()` fails the request
   instead of leaking the connection.
 
-[Unreleased]: https://github.com/Lexmata/nestjs-bun/compare/v0.4.0...HEAD
+[Unreleased]: https://github.com/Lexmata/nestjs-bun/compare/v0.5.0...HEAD
+[0.5.0]: https://github.com/Lexmata/nestjs-bun/compare/v0.4.0...v0.5.0
 [0.4.0]: https://github.com/Lexmata/nestjs-bun/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/Lexmata/nestjs-bun/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/Lexmata/nestjs-bun/releases/tag/v0.2.0

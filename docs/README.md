@@ -3,14 +3,14 @@
 The documentation site for [`@lexmata/nestjs-platform-bun`](https://github.com/Lexmata/nestjs-bun) —
 a NestJS HTTP adapter that runs on Bun's native server.
 
-It is a standalone Angular 21 application with its own `package.json` and lockfile, so it is
+It is a standalone Angular 22 application with its own `package.json` and lockfile, so it is
 **not** part of the root workspace. Install and build it from this directory.
 
 ## Prerequisites
 
-- Node.js 20+ — the Angular CLI toolchain runs on Node. The *adapter* requires Bun; building
+- Node.js 22.22+ — the Angular CLI toolchain runs on Node. The *adapter* requires Bun; building
   these docs does not.
-- pnpm — the project pins `pnpm@10.26.2` via `packageManager`.
+- pnpm — the project pins `pnpm@12.14.0` via `packageManager`.
 
 ## Setup
 
@@ -46,7 +46,9 @@ pnpm watch    # development build, rebuilding on change
 pnpm test
 ```
 
-Runs unit tests under Vitest. There is no end-to-end suite — no e2e builder is configured, so
+Runs unit tests under Vitest. The one suite, `src/app/pages/fastify-compat.spec.ts`, checks the
+Fastify Compatibility page against the adapter's real hook list; `bun test` at the repository root
+runs it too, and that is the run CI gates on. There is no end-to-end suite — no e2e builder is configured, so
 `ng e2e` will fail.
 
 ## Structure

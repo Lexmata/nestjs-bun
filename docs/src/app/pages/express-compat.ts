@@ -1,10 +1,11 @@
-import { Component } from '@angular/core';
+import { Component, ChangeDetectionStrategy } from '@angular/core';
 import { CommonModule } from '@angular/common';
 
 @Component({
   selector: 'app-express-compat',
   standalone: true,
   imports: [CommonModule],
+  changeDetection: ChangeDetectionStrategy.Eager,
   template: `
     <article class="max-w-4xl mx-auto px-6 py-12 animate-fade-in">
       <h1 class="text-4xl font-bold mb-4">Express Compatibility</h1>
