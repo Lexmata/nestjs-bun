@@ -28,7 +28,7 @@ export const PACKAGE_NAME = '@lexmata/nestjs-platform-bun';
  * Must match `version` in the root `package.json`. Render it through
  * {@link VERSION_LABEL} rather than prefixing `v` at each call site.
  */
-export const VERSION = '0.2.0';
+export const VERSION = '0.5.0';
 
 /** `VERSION` with the conventional `v` prefix, for display. */
 export const VERSION_LABEL = `v${VERSION}`;
