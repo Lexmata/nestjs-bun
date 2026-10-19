@@ -89,17 +89,17 @@ In `bunfig.toml`, enforced **per file**, not just on the "All files" row — one
 
 Root, `examples/` and `benchmark/` each have their own `pnpm-lock.yaml` and need their own `pnpm install` (so does the Angular site in `docs/`, which CI never installs). Each has its own `pnpm-workspace.yaml` whose `allowBuilds` satisfies `ERR_PNPM_IGNORED_BUILDS` on pnpm >= 10.26.
 
-pnpm 12 enforces a default `minimumReleaseAge` of one day and rejects a lockfile containing anything newer, even one it would happily install. If an install fails on that, re-resolve (`pnpm clean --lockfile && pnpm install`) rather than relaxing the policy.
+pnpm 12 enforces a default `minimumReleaseAge` of one day and rejects a lockfile containing anything newer, even one it would happily install. If an install fails on that, re-resolve (`pnpm clean --lockfile && pnpm install`) rather than relaxing the policy. Two traps: a range like `^12.2.0` written by `pnpm update --latest` can *force* the too-new version, so lower the range rather than just re-resolving; and a warm local metadata cache can let `pnpm install --frozen-lockfile` pass locally while CI rejects the same lockfile, so check with an empty cache (`XDG_CACHE_HOME=$(mktemp -d) pnpm install --frozen-lockfile`).
+
+`pnpm typecheck:examples` is the only check that resolves the package **by name** (`"@lexmata/nestjs-platform-bun": "file:.."`) through its `exports` map and the emitted `dist/index.d.ts`, rather than reading `src/`. That makes it the de-facto contract test for what users actually install — 0.1.0 shipped an `exports` map pointing at a `dist/index.mjs` tsup never emitted, and nothing in CI noticed because nothing resolved the package by name.
 
 ### Two TypeScripts in the root project
 
 TypeScript 7 ships no compiler API, and both typescript-eslint and tsup's DTS step (rollup-plugin-dts) need one. The root therefore follows the TS 7 release notes' side-by-side setup: `typescript` is aliased to `@typescript/typescript6` (the 6.0 API, `tsc6` binary) for those tools, and `@typescript/native` is aliased to `typescript@7`, which provides `tsc`. So `pnpm typecheck` runs TS 7 while lint and the `.d.ts` build run on 6.0. Don't collapse it to a single `typescript` entry until typescript-eslint and tsup both support TS 7. `docs/` stays on TS 6.0 outright because Angular pins `>=6.0 <6.1`.
 
-`pnpm typecheck:examples` is the only check that resolves the package **by name** (`"@lexmata/nestjs-platform-bun": "file:.."`) through its `exports` map and the emitted `dist/index.d.ts`, rather than reading `src/`. That makes it the de-facto contract test for what users actually install — 0.1.0 shipped an `exports` map pointing at a `dist/index.mjs` tsup never emitted, and nothing in CI noticed because nothing resolved the package by name.
+### CI triggers on `main` and `develop`
 
-### CI triggers only on `main`
-
-`.github/workflows/ci.yml` fires on `push` and `pull_request` for `main` only. The project uses git flow, so PRs land on `develop` first — those get **no CI run at all**, and the suite first executes when `develop` merges to `main`. Verify locally (`pnpm lint && pnpm typecheck && bun test --coverage`) before merging anything into `develop`.
+`.github/workflows/ci.yml` fires on `push` and `pull_request` for both `main` and `develop`, so feature PRs into `develop` get the full `test` and `benchmark` jobs. CI never installs `docs/`; run `pnpm build` and `pnpm test` there yourself when touching it.
 
 ## Publishing
 
