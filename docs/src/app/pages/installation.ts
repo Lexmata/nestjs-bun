@@ -1,4 +1,4 @@
-import { Component } from '@angular/core';
+import { Component, ChangeDetectionStrategy } from '@angular/core';
 import { CommonModule } from '@angular/common';
 import { RouterLink } from '@angular/router';
 
@@ -6,6 +6,7 @@ import { RouterLink } from '@angular/router';
   selector: 'app-installation',
   standalone: true,
   imports: [CommonModule, RouterLink],
+  changeDetection: ChangeDetectionStrategy.Eager,
   template: `
     <article class="max-w-4xl mx-auto px-6 py-12 animate-fade-in">
       <h1 class="text-4xl font-bold mb-4">Installation</h1>
@@ -41,9 +42,9 @@ import { RouterLink } from '@angular/router';
               </svg>
             </div>
             <div>
-              <h3 class="font-semibold text-text-primary">NestJS v10+ or v11+</h3>
+              <h3 class="font-semibold text-text-primary">NestJS 10, 11 or 12</h3>
               <p class="text-text-secondary text-sm mt-1">
-                This adapter supports both NestJS 10 and 11.
+                This adapter supports NestJS 10, 11 and 12.
               </p>
             </div>
           </div>
@@ -87,8 +88,8 @@ import { RouterLink } from '@angular/router';
 
         <div class="bg-bg-code rounded-lg border border-border p-4 overflow-x-auto">
           <pre><code class="text-sm"><span class="token-string">"peerDependencies"</span>: &#123;
-  <span class="token-string">"&#64;nestjs/common"</span>: <span class="token-string">"^10.0.0 || ^11.0.0"</span>,
-  <span class="token-string">"&#64;nestjs/core"</span>: <span class="token-string">"^10.0.0 || ^11.0.0"</span>
+  <span class="token-string">"&#64;nestjs/common"</span>: <span class="token-string">"^10.0.0 || ^11.0.0 || ^12.0.0"</span>,
+  <span class="token-string">"&#64;nestjs/core"</span>: <span class="token-string">"^10.0.0 || ^11.0.0 || ^12.0.0"</span>
 &#125;</code></pre>
         </div>
 

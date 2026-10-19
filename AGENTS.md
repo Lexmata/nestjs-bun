@@ -85,9 +85,15 @@ In `bunfig.toml`, enforced **per file**, not just on the "All files" row — one
 
 `pnpm bench:verify` gates **per endpoint** on ratios against Express and Fastify measured in the same run (`VERIFY_MIN_RATIO_EXPRESS` / `VERIFY_MIN_RATIO_FASTIFY` in `ci.yml`). Floors are derived from `pnpm verify`, **not** `pnpm bench` — the two use different load shapes (50 conns / pipelining 5 vs 100 / 10) and yield different ratios; conflating them is why an earlier set of floors was wrong. Because they're relative, they cannot catch a slowdown affecting all three adapters equally. The correctness half (every adapter must boot and return correct responses) is not tunable.
 
-### Three separate pnpm projects
+### Separate pnpm projects
 
-Root, `examples/` and `benchmark/` each have their own `pnpm-lock.yaml` and need their own `pnpm install`. `examples/` additionally has its own `pnpm-workspace.yaml` to satisfy `ERR_PNPM_IGNORED_BUILDS` on pnpm >= 10.26.
+Root, `examples/` and `benchmark/` each have their own `pnpm-lock.yaml` and need their own `pnpm install` (so does the Angular site in `docs/`, which CI never installs). Each has its own `pnpm-workspace.yaml` whose `allowBuilds` satisfies `ERR_PNPM_IGNORED_BUILDS` on pnpm >= 10.26.
+
+pnpm 12 enforces a default `minimumReleaseAge` of one day and rejects a lockfile containing anything newer, even one it would happily install. If an install fails on that, re-resolve (`pnpm clean --lockfile && pnpm install`) rather than relaxing the policy.
+
+### Two TypeScripts in the root project
+
+TypeScript 7 ships no compiler API, and both typescript-eslint and tsup's DTS step (rollup-plugin-dts) need one. The root therefore follows the TS 7 release notes' side-by-side setup: `typescript` is aliased to `@typescript/typescript6` (the 6.0 API, `tsc6` binary) for those tools, and `@typescript/native` is aliased to `typescript@7`, which provides `tsc`. So `pnpm typecheck` runs TS 7 while lint and the `.d.ts` build run on 6.0. Don't collapse it to a single `typescript` entry until typescript-eslint and tsup both support TS 7. `docs/` stays on TS 6.0 outright because Angular pins `>=6.0 <6.1`.
 
 `pnpm typecheck:examples` is the only check that resolves the package **by name** (`"@lexmata/nestjs-platform-bun": "file:.."`) through its `exports` map and the emitted `dist/index.d.ts`, rather than reading `src/`. That makes it the de-facto contract test for what users actually install — 0.1.0 shipped an `exports` map pointing at a `dist/index.mjs` tsup never emitted, and nothing in CI noticed because nothing resolved the package by name.
 

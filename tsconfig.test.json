@@ -9,7 +9,7 @@
   // block skipped while vitest still exited 0). Two independent gates were
   // both reporting green on code neither of them was reading.
   //
-  // Adding "test/**/*" to the root include surfaces 48 real type errors, all of
+  // Adding "test/**/*" to the root include surfaces 52 real type errors, all of
   // them in test/e2e/. They are genuine findings, not config noise - mostly
   // `unknown` bodies from the 0.2.0 lazy-body change (TS18046) and untyped
   // Express middleware parameters (TS7006). Folding them into the root config
