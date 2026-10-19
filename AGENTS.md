@@ -63,6 +63,7 @@ Every request ending — success, 404, hook short-circuit, hook error — routes
 | `src/bun-adapter.ts` | `BunAdapter` + `BunServerWrapper`. Routing, lifecycle, CORS, static assets, versioning. |
 | `src/express-compat.ts` | Express-shaped `req`/`res` over Bun's `Request`/`Response`. Heavily lazy — headers, query, cookies, `ip` etc. are memoised per-request getters. |
 | `src/fastify-compat.ts` | Fastify request/reply, `FastifyHooksManager` (7 supported hooks, timeouts), `FastifyPluginRegistry`. |
+| `src/fastify-hooks.ts` | `SUPPORTED_FASTIFY_HOOKS` / `FastifyHookName`, re-exported by `fastify-compat.ts`. Must stay import-free: the `docs/` spec imports it under the Angular compiler, which has no Bun or NestJS types. |
 | `src/nest-bun-application.ts` | `NestBunFactory.create` / `.createWithServer`. |
 | `src/utils/request.ts`, `src/utils/response.ts` | Parsing helpers and `ResponseBuilder`, both part of the public API. |
 | `src/interfaces/index.ts` | Public types. Never imported by tests, so absent from coverage. |
