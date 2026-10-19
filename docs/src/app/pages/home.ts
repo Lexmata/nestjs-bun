@@ -1,4 +1,4 @@
-import { Component } from '@angular/core';
+import { Component, ChangeDetectionStrategy } from '@angular/core';
 import { RouterLink } from '@angular/router';
 import { CommonModule } from '@angular/common';
 import { COPYRIGHT, PACKAGE_NAME, REPO_URL, VERSION_LABEL } from '../site';
@@ -7,6 +7,7 @@ import { COPYRIGHT, PACKAGE_NAME, REPO_URL, VERSION_LABEL } from '../site';
   selector: 'app-home',
   standalone: true,
   imports: [CommonModule, RouterLink],
+  changeDetection: ChangeDetectionStrategy.Eager,
   template: `
     <div class="animate-fade-in">
       <!-- Hero Section -->

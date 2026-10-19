@@ -1,0 +1,12 @@
+# pnpm >= 10.26 fails `pnpm install` outright with ERR_PNPM_IGNORED_BUILDS
+# unless every dependency carrying a postinstall script is explicitly allowed or
+# denied.
+#
+# All of these come from the Angular CLI toolchain and set up native binaries it
+# runs: esbuild (bundling), lmdb and msgpackr-extract (the build cache) and
+# @parcel/watcher (`ng serve` / `ng build --watch`).
+allowBuilds:
+  '@parcel/watcher': true
+  esbuild: true
+  lmdb: true
+  msgpackr-extract: true

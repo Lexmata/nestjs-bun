@@ -9,7 +9,7 @@ It implements NestJS's `AbstractHttpAdapter` on top of Bun's native HTTP server,
 **This package runs on Bun only.** Node.js support is an explicit non-goal — the adapter calls `Bun.serve()`, `Bun.file()` and other Bun built-ins directly, and there are no Node fallbacks. Running it under Node will fail at startup.
 
 - Bun `>= 1.0.0`
-- `@nestjs/common` and `@nestjs/core` `^10` or `^11` (peer dependencies)
+- `@nestjs/common` and `@nestjs/core` `^10`, `^11` or `^12` (peer dependencies)
 
 ## Installation
 

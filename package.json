@@ -37,7 +37,7 @@
     "test:unit": "bun test src/",
     "test:e2e": "bun test test/e2e/",
     "typecheck": "tsc --noEmit",
-    "_comment:typecheck:test": "Separate from `typecheck` because the root tsconfig only includes src/. test/e2e currently has 48 type errors (see tsconfig.test.json); this gate tracks them without turning the main gate red. Fold it back into `typecheck` once test/ is clean.",
+    "_comment:typecheck:test": "Separate from `typecheck` because the root tsconfig only includes src/. test/e2e currently has 52 type errors (see tsconfig.test.json); this gate tracks them without turning the main gate red. Fold it back into `typecheck` once test/ is clean.",
     "typecheck:test": "tsc --noEmit -p tsconfig.test.json",
     "typecheck:bench": "cd benchmark && pnpm typecheck",
     "typecheck:examples": "pnpm build && cd examples && pnpm install && pnpm typecheck",
@@ -64,24 +64,25 @@
     "url": "git+https://github.com/Lexmata/nestjs-bun.git"
   },
   "peerDependencies": {
-    "@nestjs/common": "^10.0.0 || ^11.0.0",
-    "@nestjs/core": "^10.0.0 || ^11.0.0"
+    "@nestjs/common": "^10.0.0 || ^11.0.0 || ^12.0.0",
+    "@nestjs/core": "^10.0.0 || ^11.0.0 || ^12.0.0"
   },
   "devDependencies": {
-    "@commitlint/cli": "^20.3.0",
-    "@commitlint/config-conventional": "^20.3.0",
-    "@eslint/js": "^9.18.0",
-    "@nestjs/common": "^11.0.0",
-    "@nestjs/core": "^11.0.0",
-    "@types/bun": "^1.2.4",
-    "eslint": "^9.18.0",
+    "@commitlint/cli": "^21.2.4",
+    "@commitlint/config-conventional": "^21.2.4",
+    "@eslint/js": "^10.0.1",
+    "@nestjs/common": "^12.2.0",
+    "@nestjs/core": "^12.2.0",
+    "@types/bun": "^1.4.3",
+    "@typescript/native": "npm:typescript@^7.0.2",
+    "eslint": "^10.13.0",
     "husky": "^9.1.7",
     "reflect-metadata": "^0.2.2",
-    "rxjs": "^7.8.1",
-    "tsup": "^8.4.0",
-    "typescript": "^5.7.3",
-    "typescript-eslint": "^8.21.0",
-    "vitest": "^4.0.16"
+    "rxjs": "^7.8.2",
+    "tsup": "^9.0.0",
+    "typescript": "npm:@typescript/typescript6@^6.0.2",
+    "typescript-eslint": "^8.71.2",
+    "vitest": "^5.0.5"
   },
-  "packageManager": "pnpm@10.26.2"
+  "packageManager": "pnpm@12.14.0"
 }
